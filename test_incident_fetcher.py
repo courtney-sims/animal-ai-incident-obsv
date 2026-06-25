@@ -1,10 +1,10 @@
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-from incident_fetcher import parse_csv, write_json, fetch_csv, main
+from incident_fetcher import parse_csv, write_json, fetch_csv, main, query_openalex, collect_data
 
 
 def test_parse_csv_empty():
@@ -49,13 +49,76 @@ def test_fetch_csv_raises_on_http_error(mock_get):
         fetch_csv("http://example.com/bad.csv")
 
 
-@patch("incident_fetcher.fetch_csv")
-@patch("incident_fetcher.parse_csv")
-@patch("incident_fetcher.write_json")
-def test_main_integration(mock_write, mock_parse, mock_fetch):
-    mock_fetch.return_value = "a,b\n1,2\n"
-    mock_parse.return_value = [{"a": "1", "b": "2"}]
+@patch("incident_fetcher.requests.get")
+def test_main_writes_combined_output(mock_get, tmp_path, monkeypatch):
+    csv_response = MagicMock()
+    csv_response.text = "id,name\n1,Alice\n2,Bob\n"
+
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 1},
+        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
+    }
+
+    mock_get.side_effect = [csv_response, oa_response]
+
+    output_path = tmp_path / "out.json"
+    monkeypatch.setattr("incident_fetcher.OUTPUT_PATH", str(output_path))
+
     main()
-    mock_fetch.assert_called_once()
-    mock_parse.assert_called_once_with("a,b\n1,2\n")
-    mock_write.assert_called_once()
+
+    assert output_path.exists()
+    with open(output_path) as f:
+        data = json.load(f)
+
+    csv_records = [r for r in data if r.get("aaiid_data_source") == "nhtsa_incident_report"]
+    oa_records = [r for r in data if r.get("aaiid_data_source") == "openalex_work"]
+
+    assert len(csv_records) == 2
+    assert len(oa_records) == 1
+    assert csv_records[0]["id"] == "1"
+    assert oa_records[0]["title"] == "Paper on animal behavior"
+
+
+@patch("incident_fetcher.requests.get")
+def test_query_openalex_returns_papers(mock_get):
+    mock_response = mock_get.return_value
+    mock_response.json.return_value = {
+        "meta": {"count": 1, "page": 1, "per_page": 25},
+        "results": [
+            {
+                "id": "https://openalex.org/W123",
+                "title": "Animal cognition in autonomous systems",
+            }
+        ],
+    }
+    result = query_openalex({"per_page": 25})
+    assert len(result) == 1
+    assert result[0]["id"] == "https://openalex.org/W123"
+    assert result[0]["title"] == "Animal cognition in autonomous systems"
+
+
+@patch("incident_fetcher.requests.get")
+def test_collect_data_returns_combined_sources(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "id,name\n1,Alice\n2,Bob\n"
+
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 1},
+        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
+    }
+
+    mock_get.side_effect = [csv_response, oa_response]
+
+    result = collect_data()
+
+    csv_records = [r for r in result if r.get("aaiid_data_source") == "nhtsa_incident_report"]
+    oa_records = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
+
+    assert len(csv_records) == 2
+    assert csv_records[0]["id"] == "1"
+    assert csv_records[0]["name"] == "Alice"
+    assert len(oa_records) == 1
+    assert oa_records[0]["id"] == "W1"
+    assert result[-1]["aaiid_data_source"] == "openalex_work"
