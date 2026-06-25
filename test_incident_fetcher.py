@@ -1,10 +1,69 @@
 import json
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-from incident_fetcher import parse_csv, write_json, fetch_csv, main, query_openalex, collect_data
+from incident_fetcher import (
+    parse_csv,
+    write_json,
+    fetch_csv,
+    main,
+    query_openalex,
+    collect_data,
+    filter_by_date,
+    trim_nhtsa_fields,
+    generate_prompt,
+    run_classification,
+    write_timestamped_csv,
+)
+
+
+NHTSA_KEEP = [
+    "Report ID", "Report Version", "Reporting Entity",
+    "Crash With", "Narrative", "City", "State",
+    "Incident Date", "SV Precrash Speed (MPH)",
+    "Highest Injury Severity Alleged",
+    "CP Pre-Crash Movement", "SV Pre-Crash Movement",
+    "Within ODD?", "aaiid_data_source",
+]
+
+
+def test_trim_nhtsa_fields():
+    row = {
+        "Report ID": "123",
+        "Report Version": "1",
+        "Reporting Entity": "Waymo LLC",
+        "Crash With": "Animal",
+        "Narrative": "Hit a duck",
+        "City": "Austin",
+        "State": "TX",
+        "Incident Date": "MAR-2026",
+        "SV Precrash Speed (MPH)": "15",
+        "Highest Injury Severity Alleged": "Property Damage",
+        "CP Pre-Crash Movement": "Stopped",
+        "SV Pre-Crash Movement": "Proceeding Straight",
+        "Within ODD?": "Yes",
+        "aaiid_data_source": "nhtsa_incident_report",
+        "VIN": "SOMEVIN",
+        "Weather - Clear": "Y",
+        "Roadway-No Unusual Conditions": "Y",
+        "Any Air Bags Deployed?": "No",
+        "Latitude": "[REDACTED]",
+    }
+    result = trim_nhtsa_fields([row])
+    assert len(result) == 1
+    assert list(result[0].keys()) == NHTSA_KEEP
+    assert result[0]["Report ID"] == "123"
+    assert result[0]["Narrative"] == "Hit a duck"
+    assert "VIN" not in result[0]
+    assert "Weather - Clear" not in result[0]
+
+
+def test_trim_nhtsa_fields_empty():
+    assert trim_nhtsa_fields([]) == []
 
 
 def test_parse_csv_empty():
@@ -50,9 +109,13 @@ def test_fetch_csv_raises_on_http_error(mock_get):
 
 
 @patch("incident_fetcher.requests.get")
-def test_main_writes_combined_output(mock_get, tmp_path, monkeypatch):
+@patch("incident_fetcher.datetime")
+def test_main_writes_combined_output(mock_dt_module, mock_get, tmp_path, monkeypatch):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25)
+    mock_dt_module.strptime = datetime.strptime
+
     csv_response = MagicMock()
-    csv_response.text = "id,name\n1,Alice\n2,Bob\n"
+    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
 
     oa_response = MagicMock()
     oa_response.json.return_value = {
@@ -74,10 +137,84 @@ def test_main_writes_combined_output(mock_get, tmp_path, monkeypatch):
     csv_records = [r for r in data if r.get("aaiid_data_source") == "nhtsa_incident_report"]
     oa_records = [r for r in data if r.get("aaiid_data_source") == "openalex_work"]
 
-    assert len(csv_records) == 2
-    assert len(oa_records) == 1
+    assert len(csv_records) == 1
     assert csv_records[0]["id"] == "1"
+    assert csv_records[0]["name"] == "Alice"
     assert oa_records[0]["title"] == "Paper on animal behavior"
+
+
+@patch("incident_fetcher.requests.get")
+@patch("incident_fetcher.datetime")
+def test_collect_data_passes_expanded_select_to_openalex(mock_dt_module, mock_get):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25)
+    mock_dt_module.strptime = datetime.strptime
+
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\nJUN-2026\n"
+    oa_response = MagicMock()
+    oa_response.json.return_value = {"meta": {"count": 0}, "results": []}
+    mock_get.side_effect = [csv_response, oa_response]
+
+    collect_data()
+
+    oa_call = mock_get.call_args_list[1]
+    params = oa_call[1]["params"]
+    select_val = params.get("select", "")
+    fields = select_val.split(",")
+    assert "id" in fields
+    assert "title" in fields
+    assert "abstract_inverted_index" in fields
+    assert "concepts" in fields
+    assert "primary_location" in fields
+
+
+def test_generate_prompt_contains_key_elements():
+    prompt = generate_prompt()
+    assert isinstance(prompt, str)
+    assert len(prompt) > 100
+    assert "Crash With" in prompt
+    assert "confidence_score" in prompt
+    assert "openalex_work" in prompt
+
+
+@patch("incident_fetcher.subprocess.run")
+def test_run_classification_calls_opencode(mock_subprocess_run, tmp_path):
+    incidents_file = tmp_path / "incidents.json"
+    incidents_file.write_text("[]")
+    prompt = "Review incidents and produce a CSV"
+
+    result_path = run_classification(str(incidents_file), prompt)
+
+    assert mock_subprocess_run.called
+    args = mock_subprocess_run.call_args[0][0]
+    assert args[0] == "opencode"
+    assert args[1] == "run"
+    assert prompt in args
+    assert incidents_file.name in " ".join(args) or str(incidents_file) in " ".join(args)
+
+
+def test_write_timestamped_csv_creates_file(tmp_path):
+    csv_content = "a,b\n1,2\n"
+    result_path = write_timestamped_csv(csv_content, str(tmp_path))
+    assert result_path.startswith(str(tmp_path))
+    assert "animal_incidents_" in result_path
+    assert result_path.endswith(".csv")
+    assert Path(result_path).exists()
+    assert Path(result_path).read_text() == csv_content
+
+
+@patch("incident_fetcher.subprocess.run")
+def test_run_classification_finds_existing_csv(mock_subprocess_run, tmp_path):
+    incidents_file = tmp_path / "incidents.json"
+    incidents_file.write_text("[]")
+    prompt = "test prompt"
+
+    expected_csv = tmp_path / "animal_incidents_20260625_120000.csv"
+    expected_csv.write_text("a,b\n1,2\n")
+
+    result_path = run_classification(str(incidents_file), prompt)
+
+    assert result_path == str(expected_csv)
 
 
 @patch("incident_fetcher.requests.get")
@@ -99,9 +236,13 @@ def test_query_openalex_returns_papers(mock_get):
 
 
 @patch("incident_fetcher.requests.get")
-def test_collect_data_returns_combined_sources(mock_get):
+@patch("incident_fetcher.datetime")
+def test_collect_data_returns_combined_sources(mock_dt_module, mock_get):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25)
+    mock_dt_module.strptime = datetime.strptime
+
     csv_response = MagicMock()
-    csv_response.text = "id,name\n1,Alice\n2,Bob\n"
+    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
 
     oa_response = MagicMock()
     oa_response.json.return_value = {
@@ -116,9 +257,37 @@ def test_collect_data_returns_combined_sources(mock_get):
     csv_records = [r for r in result if r.get("aaiid_data_source") == "nhtsa_incident_report"]
     oa_records = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
 
-    assert len(csv_records) == 2
+    assert len(csv_records) == 1
     assert csv_records[0]["id"] == "1"
     assert csv_records[0]["name"] == "Alice"
     assert len(oa_records) == 1
     assert oa_records[0]["id"] == "W1"
     assert result[-1]["aaiid_data_source"] == "openalex_work"
+
+
+@patch("incident_fetcher.datetime")
+def test_filter_by_date_keeps_current_month_only(mock_dt_module):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25)
+    mock_dt_module.strptime = datetime.strptime
+    data = [
+        {"Incident Date": "JUN-2026", "id": "1"},
+        {"Incident Date": "MAY-2026", "id": "2"},
+        {"Incident Date": "APR-2026", "id": "3"},
+    ]
+    result = filter_by_date(data, months_back=1)
+    assert len(result) == 1
+    assert result[0]["id"] == "1"
+
+
+@patch("incident_fetcher.datetime")
+def test_filter_by_date_keeps_rows_without_date(mock_dt_module):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25)
+    mock_dt_module.strptime = datetime.strptime
+    data = [
+        {"id": "1"},
+        {"Incident Date": "", "id": "2"},
+        {"Incident Date": "  ", "id": "3"},
+        {"Incident Date": "JUN-2026", "id": "4"},
+    ]
+    result = filter_by_date(data, months_back=1)
+    assert len(result) == 4
