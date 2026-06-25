@@ -1,16 +1,16 @@
 # Animal-AI Incident Observer
 
-Identify NHTSA autonomous-vehicle crash reports involving non-human animals, using an LLM pipeline via `opencode run`.
+The Animal AI Incident Observatory is a public platform for tracking, cataloguing, and disseminating incidents in which AI systems caused direct harm to non-human animals.
+
+This is just a POC so far for programmatically pulling data from a couple of sources and using LLM relevance evaluation to filter for AI->Animal direct harm incidents. The output is a csv listing each incident deemed relevant along with their source, the LLM's reasoning for considering that incident relevant, and a qualitative confidence score.
 
 ## How it works
 
-Two data sources are combined into `incidents.json`:
+Data sources currently included:
+1. **NHTSA SGO-2021-01** — Standing General Order crash reports from AV operators (Waymo, Tesla, Zoox, Avride, etc.).
+2. **OpenAlex** — Academic works matching a search for `"animal"`, filtered to the last 30 days.
 
-1. **NHTSA SGO-2021-01** — Standing General Order crash reports from AV operators (Waymo, Tesla, Zoox, Avride, etc.). ~80 raw CSV columns are trimmed to a focused set (Report ID, Crash With, Narrative, City, State, etc.) for LLM-friendly input.
-
-2. **OpenAlex** — Academic works matching a search for `"animal"`, filtered to the last 30 days. Includes title, abstract, and metadata for relevance judgment.
-
-An LLM agent (via `opencode run`) reads the combined JSON, classifies each entry as animal-related or not, and writes `animal_incidents_<TIMESTAMP>.csv` with columns:
+An LLM agent (via `opencode run`) reads the combined JSON of entries pulled from the data sources, classifies each entry as animal&AI-related or not, and writes relevant entries to `animal_incidents_<TIMESTAMP>.csv` with columns:
 - `aaiid_data_source` — `nhtsa_incident_report` or `openalex_work`
 - `json_blob` — trimmed JSON of the entry
 - `reasoning` — why the entry was included
@@ -28,25 +28,8 @@ Requires [opencode](https://opencode.ai) available on `PATH`.
 
 ## Usage
 
-### Collect data only
-
 ```bash
-python incident_fetcher.py   # writes incidents.json (full fields)
-```
-
-### Full pipeline (collect + classify)
-
-```python
-from incident_fetcher import run_pipeline
-
-csv_path = run_pipeline()           # produces animal_incidents_<TS>.csv
-```
-
-### Interactive classification
-
-```bash
-# After running `python incident_fetcher.py`:
-opencode run "$(python -c 'from incident_fetcher import generate_prompt; print(generate_prompt())')" -f incidents.json
+python incident_fetcher.py
 ```
 
 ## Prompt eval
@@ -76,6 +59,5 @@ incident_fetcher.py     — data collection, field trimming, prompt generation, 
 prompt_eval.py          — test data builder, scoring metrics, eval orchestrator
 test_incident_fetcher.py
 test_prompt_eval.py
-incidents.json.bak      — example combined output
 requirements.txt
 ```
