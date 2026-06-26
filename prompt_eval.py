@@ -76,7 +76,7 @@ def run_eval(output_dir: str | None = None) -> dict:
     with open(incidents_path, "w") as f:
         json.dump(incidents, f)
 
-    prompt = generate_prompt()
+    prompt = generate_prompt(Path(incidents_path).name)
     result_path = run_classification(incidents_path, prompt)
     with open(result_path) as f:
         csv_content = f.read()
@@ -87,7 +87,7 @@ def run_eval(output_dir: str | None = None) -> dict:
     return metrics
 
 
-def score_output(generated_csv: str, expected_ids: set[str]) -> dict[str, float]:
+def score_output(generated_csv: str, expected_ids: set[str]) -> dict:
     reader = csv.DictReader(io.StringIO(generated_csv))
     found_ids = set()
     for row in reader:
