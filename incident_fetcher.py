@@ -119,9 +119,9 @@ def run_classification(incidents_path: str, prompt: str) -> str:
     return output_path
 
 
-def generate_prompt() -> str:
-    return """\
-Review the file incidents.json and produce a CSV of animal-related AI incidents.
+def generate_prompt(incidents_filename: str = "incidents.json") -> str:
+    return f"""\
+Review the file {incidents_filename} and produce a CSV of animal-related AI incidents.
 
 1. Load the JSON file (it's a JSON array of objects).
 
@@ -143,7 +143,7 @@ Review the file incidents.json and produce a CSV of animal-related AI incidents.
 def run_pipeline() -> str:
     data = collect_data(trim=True)
     write_json(data, OUTPUT_PATH)
-    prompt = generate_prompt()
+    prompt = generate_prompt(OUTPUT_PATH)
     output_path = run_classification(OUTPUT_PATH, prompt)
     return output_path
 
