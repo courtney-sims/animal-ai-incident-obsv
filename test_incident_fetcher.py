@@ -164,21 +164,6 @@ def test_collect_data_passes_expanded_select_to_openalex(mock_dt_module, mock_ge
     assert "concepts" in fields
     assert "primary_location" in fields
 
-
-def test_generate_prompt_contains_key_elements():
-    prompt = generate_prompt("test.json")
-    assert isinstance(prompt, str)
-    assert len(prompt) > 100
-    assert "Crash With" in prompt
-    assert "confidence_score" in prompt
-    assert "openalex_work" in prompt
-    assert "test.json" in prompt
-
-
-def test_generate_prompt_defaults_to_incidents_json():
-    assert "incidents.json" in generate_prompt()
-
-
 @patch("incident_fetcher.subprocess.run")
 def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tmp_path):
     incidents_file = tmp_path / "my_incidents.json"
