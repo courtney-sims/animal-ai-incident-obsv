@@ -189,8 +189,8 @@ def test_run_classification_calls_opencode(mock_subprocess_run, tmp_path):
     args = mock_subprocess_run.call_args[0][0]
     assert args[0] == "opencode"
     assert args[1] == "run"
-    assert prompt in args
-    assert incidents_file.name in " ".join(args) or str(incidents_file) in " ".join(args)
+    assert "animal_incidents_" in args[2]
+    assert incidents_file.name in args or str(incidents_file) in args
 
 
 def test_write_timestamped_csv_creates_file(tmp_path):
@@ -204,17 +204,17 @@ def test_write_timestamped_csv_creates_file(tmp_path):
 
 
 @patch("incident_fetcher.subprocess.run")
-def test_run_classification_finds_existing_csv(mock_subprocess_run, tmp_path):
+@patch("incident_fetcher.datetime")
+def test_run_classification_returns_known_path(mock_dt_module, mock_subprocess_run, tmp_path):
+    mock_dt_module.now.return_value = datetime(2026, 6, 25, 12, 0, 0)
+
     incidents_file = tmp_path / "incidents.json"
     incidents_file.write_text("[]")
     prompt = "test prompt"
 
-    expected_csv = tmp_path / "animal_incidents_20260625_120000.csv"
-    expected_csv.write_text("a,b\n1,2\n")
-
     result_path = run_classification(str(incidents_file), prompt)
 
-    assert result_path == str(expected_csv)
+    assert result_path == str(tmp_path / "animal_incidents_20260625_120000.csv")
 
 
 @patch("incident_fetcher.requests.get")

@@ -47,6 +47,7 @@ def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
         date_str = row.get("Incident Date", "")
         if not date_str or not date_str.strip():
             result.append(row)
+            print(f'Could not get incident date from {row}')
             continue
         try:
             dt = datetime.strptime(date_str.strip(), "%b-%Y")
@@ -54,7 +55,7 @@ def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
             if months_diff < months_back:
                 result.append(row)
         except ValueError:
-            result.append(row)
+            print(f'Could not parse month and year from {dt}')
     return result
 
 
@@ -74,7 +75,7 @@ def write_json(data: list[dict], path: str) -> None:
 def collect_data(trim: bool = False) -> list[dict]:
     csv_text = fetch_csv(URL)
     data = parse_csv(csv_text)
-    data = filter_by_date(data, months_back=1)
+    data = filter_by_date(data)
     for row in data:
         row["aaiid_data_source"] = "nhtsa_incident_report"
     if trim:
@@ -104,22 +105,23 @@ def write_timestamped_csv(content: str, directory: str = ".") -> str:
 
 def run_classification(incidents_path: str, prompt: str) -> str:
     workdir = Path(incidents_path).parent
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_name = f"animal_incidents_{timestamp}.csv"
+    output_path = str(workdir / output_name)
 
+    full_prompt = f"{prompt}\n\n6. Name the output file {output_name}."
     subprocess.run(
-        ["opencode", "run", prompt, "-f", incidents_path],
+        ["opencode", "run", full_prompt, "-f", incidents_path],
         cwd=str(workdir),
         check=True,
     )
 
-    csv_files = sorted(workdir.glob("animal_incidents_*.csv"))
-    if csv_files:
-        return str(csv_files[-1])
-    return str(workdir / "animal_incidents.csv")
+    return output_path
 
 
 def generate_prompt() -> str:
     return """\
-Review the file incidents.json and produce a CSV of animal-related incidents.
+Review the file incidents.json and produce a CSV of animal-related AI incidents.
 
 1. Load the JSON file (it's a JSON array of objects).
 
