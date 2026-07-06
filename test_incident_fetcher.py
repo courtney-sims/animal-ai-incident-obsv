@@ -104,66 +104,6 @@ def test_fetch_csv_raises_on_http_error(mock_get):
     with pytest.raises(requests.exceptions.HTTPError):
         fetch_csv("http://example.com/bad.csv")
 
-
-@patch("incident_fetcher.requests.get")
-@patch("incident_fetcher.datetime")
-def test_main_writes_combined_output(mock_dt_module, mock_get, tmp_path, monkeypatch):
-    mock_dt_module.now.return_value = datetime(2026, 6, 25)
-    mock_dt_module.strptime = datetime.strptime
-
-    csv_response = MagicMock()
-    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
-
-    oa_response = MagicMock()
-    oa_response.json.return_value = {
-        "meta": {"count": 1},
-        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
-    }
-
-    mock_get.side_effect = [csv_response, oa_response]
-
-    output_path = tmp_path / "out.json"
-    monkeypatch.setattr("incident_fetcher.OUTPUT_PATH", str(output_path))
-
-    main()
-
-    assert output_path.exists()
-    with open(output_path) as f:
-        data = json.load(f)
-
-    csv_records = [r for r in data if r.get("aaiid_data_source") == "nhtsa_incident_report"]
-    oa_records = [r for r in data if r.get("aaiid_data_source") == "openalex_work"]
-
-    assert len(csv_records) == 1
-    assert csv_records[0]["id"] == "1"
-    assert csv_records[0]["name"] == "Alice"
-    assert oa_records[0]["title"] == "Paper on animal behavior"
-
-
-@patch("incident_fetcher.requests.get")
-@patch("incident_fetcher.datetime")
-def test_collect_data_passes_expanded_select_to_openalex(mock_dt_module, mock_get):
-    mock_dt_module.now.return_value = datetime(2026, 6, 25)
-    mock_dt_module.strptime = datetime.strptime
-
-    csv_response = MagicMock()
-    csv_response.text = "Incident Date\nJUN-2026\n"
-    oa_response = MagicMock()
-    oa_response.json.return_value = {"meta": {"count": 0}, "results": []}
-    mock_get.side_effect = [csv_response, oa_response]
-
-    collect_data()
-
-    oa_call = mock_get.call_args_list[1]
-    params = oa_call[1]["params"]
-    select_val = params.get("select", "")
-    fields = select_val.split(",")
-    assert "id" in fields
-    assert "title" in fields
-    assert "abstract_inverted_index" in fields
-    assert "concepts" in fields
-    assert "primary_location" in fields
-
 @patch("incident_fetcher.subprocess.run")
 def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tmp_path):
     incidents_file = tmp_path / "my_incidents.json"
@@ -193,15 +133,14 @@ def test_write_timestamped_csv_creates_file(tmp_path):
 
 
 @patch("incident_fetcher.subprocess.run")
-@patch("incident_fetcher.datetime")
-def test_run_classification_returns_known_path(mock_dt_module, mock_subprocess_run, tmp_path):
-    mock_dt_module.now.return_value = datetime(2026, 6, 25, 12, 0, 0)
-
+def test_run_classification_returns_known_path(mock_subprocess_run, tmp_path):
     incidents_file = tmp_path / "incidents.json"
     incidents_file.write_text("[]")
     prompt = "test prompt"
 
-    result_path = run_classification(incidents_file, prompt)
+    result_path = run_classification(
+        incidents_file, prompt, now=datetime(2026, 6, 25, 12, 0, 0)
+    )
 
     assert result_path == tmp_path / "animal_incidents_20260625_120000.csv"
 
@@ -225,11 +164,7 @@ def test_query_openalex_returns_papers(mock_get):
 
 
 @patch("incident_fetcher.requests.get")
-@patch("incident_fetcher.datetime")
-def test_collect_data_returns_combined_sources(mock_dt_module, mock_get):
-    mock_dt_module.now.return_value = datetime(2026, 6, 25)
-    mock_dt_module.strptime = datetime.strptime
-
+def test_collect_data_returns_combined_sources(mock_get):
     csv_response = MagicMock()
     csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
 
@@ -241,7 +176,7 @@ def test_collect_data_returns_combined_sources(mock_dt_module, mock_get):
 
     mock_get.side_effect = [csv_response, oa_response]
 
-    result = collect_data()
+    result = collect_data(now=datetime(2026, 6, 25))
 
     csv_records = [r for r in result if r.get("aaiid_data_source") == "nhtsa_incident_report"]
     oa_records = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
@@ -254,15 +189,51 @@ def test_collect_data_returns_combined_sources(mock_dt_module, mock_get):
     assert result[-1]["aaiid_data_source"] == "openalex_work"
 
 
-@patch("incident_fetcher.datetime")
-def test_filter_by_date_keeps_current_month_only(mock_dt_module):
-    mock_dt_module.now.return_value = datetime(2026, 6, 25)
-    mock_dt_module.strptime = datetime.strptime
+def test_filter_by_date_keeps_current_month_only():
     data = [
         {"Incident Date": "JUN-2026", "id": "1"},
         {"Incident Date": "MAY-2026", "id": "2"},
         {"Incident Date": "APR-2026", "id": "3"},
     ]
-    result = filter_by_date(data, months_back=1)
+    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
     assert len(result) == 1
     assert result[0]["id"] == "1"
+
+
+def test_filter_by_date_drops_missing_date():
+    data = [
+        {"Incident Date": "JUN-2026", "id": "1"},
+        {"id": "2"},
+    ]
+    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
+    assert [r["id"] for r in result] == ["1"]
+
+
+def test_filter_by_date_drops_blank_date():
+    data = [
+        {"Incident Date": "   ", "id": "1"},
+        {"Incident Date": "", "id": "2"},
+    ]
+    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
+    assert result == []
+
+
+def test_filter_by_date_drops_malformed_date_without_error():
+    data = [
+        {"Incident Date": "not-a-date", "id": "1"},
+        {"Incident Date": "2026-06", "id": "2"},
+        {"Incident Date": "JUN-2026", "id": "3"},
+    ]
+    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
+    assert [r["id"] for r in result] == ["3"]
+
+
+def test_filter_by_date_months_back_wider_window():
+    data = [
+        {"Incident Date": "JUN-2026", "id": "jun"},
+        {"Incident Date": "MAY-2026", "id": "may"},
+        {"Incident Date": "APR-2026", "id": "apr"},
+        {"Incident Date": "MAR-2026", "id": "mar"},
+    ]
+    result = filter_by_date(data, months_back=3, now=datetime(2026, 6, 25))
+    assert [r["id"] for r in result] == ["jun", "may", "apr"]

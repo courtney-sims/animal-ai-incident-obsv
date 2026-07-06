@@ -40,8 +40,16 @@ def trim_nhtsa_fields(rows: list[dict]) -> list[dict]:
     return [{k: row[k] for k in NHTSA_KEEP_FIELDS if k in row} for row in rows]
 
 
-def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
-    now = datetime.now()
+def filter_by_date(
+    data: list[dict],
+    months_back: int = 1,
+    now: datetime = datetime.now(),
+) -> list[dict]:
+    """Return rows where ``Incident Date`` is within the last ``months_back`` months.
+
+    ``Incident Date`` is expected in ``"%b-%Y"`` form (e.g. ``"JUN-2026"``). Rows
+    with a missing, blank, or unparseable date are dropped and logged.
+    """
     result = []
     for row in data:
         date_str = row.get("Incident Date", "")
@@ -50,11 +58,12 @@ def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
             continue
         try:
             dt = datetime.strptime(date_str.strip(), "%b-%Y")
-            months_diff = (now.year - dt.year) * 12 + (now.month - dt.month)
-            if months_diff < months_back:
-                result.append(row)
         except ValueError:
             print(f'Could not parse month and year from {date_str}')
+            continue
+        months_diff = (now.year - dt.year) * 12 + (now.month - dt.month)
+        if months_diff < months_back:
+            result.append(row)
     return result
 
 
@@ -71,16 +80,16 @@ def write_json(data: list[dict], path: Path) -> None:
         json.dump(data, f, indent=2)
 
 
-def collect_data(trim: bool = False) -> list[dict]:
+def collect_data(trim: bool = False, now: datetime = datetime.now()) -> list[dict]:
     csv_text = fetch_csv(URL)
     data = parse_csv(csv_text)
-    data = filter_by_date(data)
+    data = filter_by_date(data, now=now)
     for row in data:
         row["aaiid_data_source"] = "nhtsa_incident_report"
     if trim:
         data = trim_nhtsa_fields(data)
 
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    thirty_days_ago = (now - timedelta(days=30)).strftime("%Y-%m-%d")
     params = {
         "sort": "publication_date:desc",
         "per_page": 25,
@@ -95,17 +104,25 @@ def collect_data(trim: bool = False) -> list[dict]:
     return data + papers
 
 
-def write_timestamped_csv(content: str, directory: Path = Path(".")) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def write_timestamped_csv(
+    content: str,
+    directory: Path = Path("."),
+    now: datetime = datetime.now(),
+) -> Path:
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
     path = Path(directory) / f"animal_incidents_{timestamp}.csv"
     path.write_text(content)
     return path
 
 
-def run_classification(incidents_path: Path, prompt: str) -> Path:
+def run_classification(
+    incidents_path: Path,
+    prompt: str,
+    now: datetime = datetime.now(),
+) -> Path:
     incidents_path = Path(incidents_path)
     workdir = incidents_path.parent
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
     output_name = f"animal_incidents_{timestamp}.csv"
     output_path = workdir / output_name
 
