@@ -219,3 +219,5 @@ __marimo__/
 
 # Animal AI Obsv
 incidents.json
+*.json.bak
+animal_incidents*.csv
