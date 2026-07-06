@@ -18,6 +18,7 @@ from incident_fetcher import (
     generate_prompt,
     run_classification,
     write_timestamped_csv,
+    reconstruct_abstract,
 )
 
 
@@ -237,3 +238,61 @@ def test_filter_by_date_months_back_wider_window():
     ]
     result = filter_by_date(data, months_back=3, now=datetime(2026, 6, 25))
     assert [r["id"] for r in result] == ["jun", "may", "apr"]
+
+
+def test_reconstruct_abstract():
+    inv = {"the": [0, 3], "cat": [1], "and": [2], "dog": [4]}
+    assert reconstruct_abstract(inv) == "the cat and the dog"
+
+
+def test_reconstruct_abstract_none_returns_none():
+    assert reconstruct_abstract(None) is None
+
+
+def test_reconstruct_abstract_empty_dict_returns_none():
+    assert reconstruct_abstract({}) is None
+
+
+@patch("incident_fetcher.requests.get")
+def test_collect_data_reconstructs_openalex_abstract(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\n"
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 1},
+        "results": [
+            {
+                "id": "W1",
+                "title": "A paper",
+                "abstract_inverted_index": {
+                    "Autonomous": [0], "vehicles": [1], "and": [2], "deer": [3]
+                },
+            }
+        ],
+    }
+    mock_get.side_effect = [csv_response, oa_response]
+
+    result = collect_data(now=datetime(2026, 6, 25))
+
+    papers = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
+    assert len(papers) == 1
+    assert papers[0]["abstract"] == "Autonomous vehicles and deer"
+    # inverted index is removed after reconstruction
+    assert "abstract_inverted_index" not in papers[0]
+
+
+@patch("incident_fetcher.requests.get")
+def test_collect_data_handles_missing_openalex_abstract(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\n"
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 1},
+        "results": [{"id": "W1", "title": "A paper"}],  # no abstract field
+    }
+    mock_get.side_effect = [csv_response, oa_response]
+
+    result = collect_data(now=datetime(2026, 6, 25))
+
+    papers = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
+    assert papers[0]["abstract"] is None
