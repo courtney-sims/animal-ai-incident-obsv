@@ -8,7 +8,7 @@ import tablib
 
 
 URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
-OUTPUT_PATH = "incidents.json"
+OUTPUT_PATH = Path("incidents.json")
 OPENALEX_BASE_URL = "https://api.openalex.org/works"
 
 
@@ -46,7 +46,6 @@ def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
     for row in data:
         date_str = row.get("Incident Date", "")
         if not date_str or not date_str.strip():
-            result.append(row)
             print(f'Could not get incident date from {row}')
             continue
         try:
@@ -55,7 +54,7 @@ def filter_by_date(data: list[dict], months_back: int = 1) -> list[dict]:
             if months_diff < months_back:
                 result.append(row)
         except ValueError:
-            print(f'Could not parse month and year from {dt}')
+            print(f'Could not parse month and year from {date_str}')
     return result
 
 
@@ -64,10 +63,10 @@ def parse_csv(text: str) -> list[dict]:
         return []
     data = tablib.Dataset()
     data.load(text, format="csv")
-    return list(data.dict)
+    return data.dict
 
 
-def write_json(data: list[dict], path: str) -> None:
+def write_json(data: list[dict], path: Path) -> None:
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -96,22 +95,23 @@ def collect_data(trim: bool = False) -> list[dict]:
     return data + papers
 
 
-def write_timestamped_csv(content: str, directory: str = ".") -> str:
+def write_timestamped_csv(content: str, directory: Path = Path(".")) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = Path(directory) / f"animal_incidents_{timestamp}.csv"
     path.write_text(content)
-    return str(path)
+    return path
 
 
-def run_classification(incidents_path: str, prompt: str) -> str:
-    workdir = Path(incidents_path).parent
+def run_classification(incidents_path: Path, prompt: str) -> Path:
+    incidents_path = Path(incidents_path)
+    workdir = incidents_path.parent
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_name = f"animal_incidents_{timestamp}.csv"
-    output_path = str(workdir / output_name)
+    output_path = workdir / output_name
 
     full_prompt = f"{prompt}\n\n6. Name the output file {output_name}."
     subprocess.run(
-        ["opencode", "run", full_prompt, "-f", incidents_path],
+        ["opencode", "run", full_prompt, "-f", str(incidents_path)],
         cwd=str(workdir),
         check=True,
     )
@@ -140,10 +140,10 @@ Review the file {incidents_filename} and produce a CSV of animal-related AI inci
 """
 
 
-def run_pipeline() -> str:
+def run_pipeline() -> Path:
     data = collect_data(trim=True)
     write_json(data, OUTPUT_PATH)
-    prompt = generate_prompt(OUTPUT_PATH)
+    prompt = generate_prompt(str(OUTPUT_PATH))
     output_path = run_classification(OUTPUT_PATH, prompt)
     return output_path
 

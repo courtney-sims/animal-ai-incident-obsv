@@ -170,8 +170,9 @@ def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tm
     incidents_file.write_text("[]")
     prompt = generate_prompt(incidents_file.name)
 
-    result_path = run_classification(str(incidents_file), prompt)
+    result_path = run_classification(incidents_file, prompt)
 
+    assert isinstance(result_path, Path)
     assert mock_subprocess_run.called
     args = mock_subprocess_run.call_args[0][0]
     assert args[0] == "opencode"
@@ -182,12 +183,13 @@ def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tm
 
 def test_write_timestamped_csv_creates_file(tmp_path):
     csv_content = "a,b\n1,2\n"
-    result_path = write_timestamped_csv(csv_content, str(tmp_path))
-    assert result_path.startswith(str(tmp_path))
-    assert "animal_incidents_" in result_path
-    assert result_path.endswith(".csv")
-    assert Path(result_path).exists()
-    assert Path(result_path).read_text() == csv_content
+    result_path = write_timestamped_csv(csv_content, tmp_path)
+    assert isinstance(result_path, Path)
+    assert result_path.parent == tmp_path
+    assert result_path.name.startswith("animal_incidents_")
+    assert result_path.suffix == ".csv"
+    assert result_path.exists()
+    assert result_path.read_text() == csv_content
 
 
 @patch("incident_fetcher.subprocess.run")
@@ -199,9 +201,9 @@ def test_run_classification_returns_known_path(mock_dt_module, mock_subprocess_r
     incidents_file.write_text("[]")
     prompt = "test prompt"
 
-    result_path = run_classification(str(incidents_file), prompt)
+    result_path = run_classification(incidents_file, prompt)
 
-    assert result_path == str(tmp_path / "animal_incidents_20260625_120000.csv")
+    assert result_path == tmp_path / "animal_incidents_20260625_120000.csv"
 
 
 @patch("incident_fetcher.requests.get")

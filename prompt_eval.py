@@ -72,18 +72,18 @@ def run_eval(output_dir: str | None = None) -> dict:
     incidents, expected_ids = build_test_data()
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
-    incidents_path = str(Path(output_dir) / "test_incidents.json")
+    incidents_path = Path(output_dir) / "test_incidents.json"
     with open(incidents_path, "w") as f:
         json.dump(incidents, f)
 
-    prompt = generate_prompt(Path(incidents_path).name)
+    prompt = generate_prompt(incidents_path.name)
     result_path = run_classification(incidents_path, prompt)
     with open(result_path) as f:
         csv_content = f.read()
 
     metrics = score_output(csv_content, expected_ids)
-    metrics["output_path"] = result_path
-    metrics["incidents_path"] = incidents_path
+    metrics["output_path"] = str(result_path)
+    metrics["incidents_path"] = str(incidents_path)
     return metrics
 
 
