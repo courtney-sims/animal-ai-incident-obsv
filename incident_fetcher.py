@@ -43,20 +43,13 @@ def trim_nhtsa_fields(rows: list[dict]) -> list[dict]:
 def filter_by_date(
     data: list[dict],
     months_back: int = 1,
-    now: datetime | None = None,
+    now: datetime = datetime.now(),
 ) -> list[dict]:
-    """Return rows whose ``Incident Date`` is within the last ``months_back`` months.
+    """Return rows where ``Incident Date`` is within the last ``months_back`` months.
 
     ``Incident Date`` is expected in ``"%b-%Y"`` form (e.g. ``"JUN-2026"``). Rows
-    with a missing, blank, or unparseable date are dropped and logged. A row is
-    kept when ``months_diff < months_back`` (so ``months_back=1`` keeps only the
-    current month).
-
-    ``now`` may be supplied for deterministic testing; defaults to
-    ``datetime.now()`` at call time.
+    with a missing, blank, or unparseable date are dropped and logged.
     """
-    if now is None:
-        now = datetime.now()
     result = []
     for row in data:
         date_str = row.get("Incident Date", "")
@@ -87,9 +80,7 @@ def write_json(data: list[dict], path: Path) -> None:
         json.dump(data, f, indent=2)
 
 
-def collect_data(trim: bool = False, now: datetime | None = None) -> list[dict]:
-    if now is None:
-        now = datetime.now()
+def collect_data(trim: bool = False, now: datetime = datetime.now()) -> list[dict]:
     csv_text = fetch_csv(URL)
     data = parse_csv(csv_text)
     data = filter_by_date(data, now=now)
@@ -116,10 +107,8 @@ def collect_data(trim: bool = False, now: datetime | None = None) -> list[dict]:
 def write_timestamped_csv(
     content: str,
     directory: Path = Path("."),
-    now: datetime | None = None,
+    now: datetime = datetime.now(),
 ) -> Path:
-    if now is None:
-        now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     path = Path(directory) / f"animal_incidents_{timestamp}.csv"
     path.write_text(content)
@@ -129,10 +118,8 @@ def write_timestamped_csv(
 def run_classification(
     incidents_path: Path,
     prompt: str,
-    now: datetime | None = None,
+    now: datetime = datetime.now(),
 ) -> Path:
-    if now is None:
-        now = datetime.now()
     incidents_path = Path(incidents_path)
     workdir = incidents_path.parent
     timestamp = now.strftime("%Y%m%d_%H%M%S")

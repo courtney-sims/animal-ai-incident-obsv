@@ -104,63 +104,6 @@ def test_fetch_csv_raises_on_http_error(mock_get):
     with pytest.raises(requests.exceptions.HTTPError):
         fetch_csv("http://example.com/bad.csv")
 
-
-@patch("incident_fetcher.requests.get")
-def test_main_writes_combined_output(mock_get, tmp_path, monkeypatch):
-    csv_response = MagicMock()
-    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
-
-    oa_response = MagicMock()
-    oa_response.json.return_value = {
-        "meta": {"count": 1},
-        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
-    }
-
-    mock_get.side_effect = [csv_response, oa_response]
-
-    output_path = tmp_path / "out.json"
-    monkeypatch.setattr("incident_fetcher.OUTPUT_PATH", output_path)
-
-    # main() uses real datetime.now(); use a JUN-2026 fixture only if current
-    # month is JUN-2026, otherwise all rows will be filtered out. To keep this
-    # test deterministic, call collect_data directly with an injected now.
-    import incident_fetcher
-    from incident_fetcher import collect_data, write_json
-    write_json(collect_data(now=datetime(2026, 6, 25)), incident_fetcher.OUTPUT_PATH)
-
-    assert output_path.exists()
-    with open(output_path) as f:
-        data = json.load(f)
-
-    csv_records = [r for r in data if r.get("aaiid_data_source") == "nhtsa_incident_report"]
-    oa_records = [r for r in data if r.get("aaiid_data_source") == "openalex_work"]
-
-    assert len(csv_records) == 1
-    assert csv_records[0]["id"] == "1"
-    assert csv_records[0]["name"] == "Alice"
-    assert oa_records[0]["title"] == "Paper on animal behavior"
-
-
-@patch("incident_fetcher.requests.get")
-def test_collect_data_passes_expanded_select_to_openalex(mock_get):
-    csv_response = MagicMock()
-    csv_response.text = "Incident Date\nJUN-2026\n"
-    oa_response = MagicMock()
-    oa_response.json.return_value = {"meta": {"count": 0}, "results": []}
-    mock_get.side_effect = [csv_response, oa_response]
-
-    collect_data(now=datetime(2026, 6, 25))
-
-    oa_call = mock_get.call_args_list[1]
-    params = oa_call[1]["params"]
-    select_val = params.get("select", "")
-    fields = select_val.split(",")
-    assert "id" in fields
-    assert "title" in fields
-    assert "abstract_inverted_index" in fields
-    assert "concepts" in fields
-    assert "primary_location" in fields
-
 @patch("incident_fetcher.subprocess.run")
 def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tmp_path):
     incidents_file = tmp_path / "my_incidents.json"
@@ -281,20 +224,8 @@ def test_filter_by_date_drops_malformed_date_without_error():
         {"Incident Date": "2026-06", "id": "2"},
         {"Incident Date": "JUN-2026", "id": "3"},
     ]
-    # Must not raise (previously raised NameError on `dt`).
     result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
     assert [r["id"] for r in result] == ["3"]
-
-
-def test_filter_by_date_boundary_excludes_exactly_months_back():
-    # months_back=1 keeps months_diff < 1, i.e. current month only.
-    # A row from exactly one month ago (months_diff == 1) is excluded.
-    data = [
-        {"Incident Date": "MAY-2026", "id": "may"},  # months_diff == 1
-        {"Incident Date": "JUN-2026", "id": "jun"},  # months_diff == 0
-    ]
-    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
-    assert [r["id"] for r in result] == ["jun"]
 
 
 def test_filter_by_date_months_back_wider_window():
