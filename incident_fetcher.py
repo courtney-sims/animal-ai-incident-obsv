@@ -26,6 +26,62 @@ def query_openalex(params: dict) -> list[dict]:
     return data.get("results", [])
 
 
+def reconstruct_abstract(inverted_index: dict | None) -> str | None:
+    """Rebuild plain-text abstract from OpenAlex ``abstract_inverted_index``.
+
+    OpenAlex returns abstracts as  word-frequency map with positions ``{word: [positions, ...]}``.
+    Ex:
+        {
+            "the": [0, 3],
+            "cat": [1],
+            "and": [2],
+            "dog": [4]
+        } == "the cat and the dog"
+
+    It's possible this isn't needed and an LLM could parse the original form equally well. Could be worth investigating.
+
+    Returns ``None`` when the input is missing, empty, or not a dict. Malformed
+    entries (non-list values, non-int positions) are skipped rather than
+    raising.
+    """
+    if not inverted_index:
+        print("reconstruct_abstract: skipping — inverted_index is empty or None")
+        return None
+    if not isinstance(inverted_index, dict):
+        print(
+            f"reconstruct_abstract: skipping — expected dict, got "
+            f"{type(inverted_index).__name__}: {inverted_index!r:.200}"
+        )
+        return None
+
+    positioned: list[tuple[int, str]] = []
+    for word, positions in inverted_index.items():
+        if not isinstance(positions, list):
+            print(
+                f"reconstruct_abstract: skipping word {word!r} — expected list of "
+                f"positions, got {type(positions).__name__}: {positions!r:.100}"
+            )
+            continue
+        for pos in positions:
+            if isinstance(pos, int):
+                positioned.append((pos, word))
+            else:
+                print(
+                    f"reconstruct_abstract: skipping position for word {word!r} — "
+                    f"expected int, got {type(pos).__name__}: {pos!r:.100}"
+                )
+
+    if not positioned:
+        print(
+            f"reconstruct_abstract: no valid positions found in inverted_index "
+            f"with {len(inverted_index)} key(s)"
+        )
+        return None
+
+    positioned.sort(key=lambda p: p[0])
+    return " ".join(word for _, word in positioned)
+
+
 NHTSA_KEEP_FIELDS = [
     "Report ID", "Report Version", "Reporting Entity",
     "Crash With", "Narrative", "City", "State",
@@ -100,6 +156,9 @@ def collect_data(trim: bool = False, now: datetime = datetime.now()) -> list[dic
     papers = query_openalex(params)
     for paper in papers:
         paper["aaiid_data_source"] = "openalex_work"
+        paper["abstract"] = reconstruct_abstract(
+            paper.pop("abstract_inverted_index", None)
+        )
 
     return data + papers
 
@@ -147,11 +206,11 @@ Review the file {incidents_filename} and produce a CSV of animal-related AI inci
    - The "Narrative" field mentions an animal keyword (e.g. dog, cat, raccoon, bird, duck, flock, domestic animal, etc.)
    - Exclude false positives: "HAWK" (pedestrian beacon acronym, not a bird) should not count.
 
-3. For each object with "aaiid_data_source": "openalex_work", read its title and abstract. Keep it only if it's actually about AI or autonomous vehicles interacting with animals. Drop general animal health, animal law, animal testing, agriculture, or other unrelated topics.
+3. For each object with "aaiid_data_source": "openalex_work", read its title and "abstract" field (already reconstructed to plain text). Keep it only if it's actually about AI or autonomous vehicles interacting with animals. Drop general animal health, animal law, animal testing, agriculture, or other unrelated topics.
 
 4. For every kept entry, trim the JSON blob to only these relevant fields:
    - NHTSA entries: Report ID, Report Version, Reporting Entity, Crash With, Narrative, City, State, Incident Date, SV Precrash Speed (MPH), Highest Injury Severity Alleged
-   - OpenAlex entries: id, title, display_name, publication_year, publication_date, primary_location.landing_page_url, primary_location.pdf_url
+   - OpenAlex entries: id, title, display_name, publication_year, publication_date, abstract, primary_location.landing_page_url, primary_location.pdf_url
 
 5. Write the CSV to the current directory with columns: aaiid_data_source, json_blob, reasoning, confidence_score. The json_blob column should contain the trimmed JSON (compact, no extra whitespace). The reasoning column should explain why the entry was included. Use confidence_score of "High" for entries with "Crash With": "Animal", "Medium" for narrative-only matches, and "Low" for OpenAlex entries where relevance is uncertain.
 """
