@@ -1,5 +1,8 @@
+import csv
+import io
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,6 +13,9 @@ import tablib
 URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
 OUTPUT_PATH = Path("incidents.json")
 OPENALEX_BASE_URL = "https://api.openalex.org/works"
+
+# Default LLM used for relevance classification.
+LLM_MODEL_DEFAULT = "opencode/deepseek-v4-flash-free"
 
 
 def fetch_csv(url: str) -> str:
@@ -174,23 +180,71 @@ def write_timestamped_csv(
     return path
 
 
+def append_llm_meta_column(csv_path: Path, model: str) -> None:
+    """Append an ``llm_meta`` column to ``csv_path`` in place to store data like the model used.
+
+    This will expand to having python write all the data from
+    the LLM provided response.
+    If an
+    ``llm_meta`` column already exists, its values are overwritten instead of
+    duplicating the column. This way if an incident is reprocessed, it will have the latest meta.
+    """
+    text = Path(csv_path).read_text()
+    if not text.strip():
+        return
+
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return
+
+    header = rows[0]
+    meta_value = json.dumps({"model": model}, separators=(",", ":"))
+
+    if "llm_meta" in header:
+        idx = header.index("llm_meta")
+        for row in rows[1:]:
+            # pad short rows so idx is addressable
+            while len(row) <= idx:
+                row.append("")
+            row[idx] = meta_value
+    else:
+        header.append("llm_meta")
+        for row in rows[1:]:
+            row.append(meta_value)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerows(rows)
+    Path(csv_path).write_text(buf.getvalue())
+
+
 def run_classification(
     incidents_path: Path,
     prompt: str,
     now: datetime = datetime.now(),
+    model: str | None = None,
 ) -> Path:
     incidents_path = Path(incidents_path)
     workdir = incidents_path.parent
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     output_name = f"animal_incidents_{timestamp}.csv"
     output_path = workdir / output_name
+    resolved_model = model or LLM_MODEL_DEFAULT
 
     full_prompt = f"{prompt}\n\n6. Name the output file {output_name}."
     subprocess.run(
-        ["opencode", "run", full_prompt, "-f", str(incidents_path)],
+        [
+            "opencode", "run", full_prompt,
+            "-f", str(incidents_path),
+            "-m", resolved_model,
+        ],
         cwd=str(workdir),
         check=True,
     )
+
+    if output_path.exists():
+        append_llm_meta_column(output_path, resolved_model)
 
     return output_path
 
@@ -216,16 +270,35 @@ Review the file {incidents_filename} and produce a CSV of animal-related AI inci
 """
 
 
-def run_pipeline() -> Path:
+def run_pipeline(model: str | None = None) -> Path:
     data = collect_data(trim=True)
     write_json(data, OUTPUT_PATH)
     prompt = generate_prompt(str(OUTPUT_PATH))
-    output_path = run_classification(OUTPUT_PATH, prompt)
+    output_path = run_classification(OUTPUT_PATH, prompt, model=model)
     return output_path
 
 
-def main() -> None:
-    write_json(collect_data(), OUTPUT_PATH)
+def parse_cli_args(argv: list[str]) -> dict:
+    """Parse ``key=value`` positional args from the CLI.
+
+    Currently accepts ``model=<provider/model>``. Unknown keys raise SystemExit
+    with a usage message.
+    """
+    known = {"model"}
+    parsed: dict = {}
+    for arg in argv:
+        if "=" not in arg:
+            sys.exit(f"unrecognized argument {arg!r}; expected key=value form (e.g. model=foo/bar)")
+        key, _, value = arg.partition("=")
+        if key not in known:
+            sys.exit(f"unknown key {key!r}; known keys: {known}")
+        parsed[key] = value
+    return parsed
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_cli_args(argv if argv is not None else sys.argv[1:])
+    run_pipeline(model=args.get("model"))
 
 
 if __name__ == "__main__":

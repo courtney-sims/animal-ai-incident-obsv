@@ -4,7 +4,11 @@ import json
 import tempfile
 from pathlib import Path
 
-from incident_fetcher import run_classification, generate_prompt
+from incident_fetcher import (
+    LLM_MODEL_DEFAULT,
+    generate_prompt,
+    run_classification,
+)
 
 
 def build_test_data() -> tuple[list[dict], set[str]]:
@@ -68,7 +72,7 @@ def _extract_id(blob: dict) -> str:
     return oid.replace("https://openalex.org/", "")
 
 
-def run_eval(output_dir: str | None = None) -> dict:
+def run_eval(output_dir: str | None = None, model: str | None = None) -> dict:
     incidents, expected_ids = build_test_data()
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
@@ -76,12 +80,14 @@ def run_eval(output_dir: str | None = None) -> dict:
     with open(incidents_path, "w") as f:
         json.dump(incidents, f)
 
+    resolved_model = model or LLM_MODEL_DEFAULT
     prompt = generate_prompt(incidents_path.name)
-    result_path = run_classification(incidents_path, prompt)
+    result_path = run_classification(incidents_path, prompt, model=resolved_model)
     with open(result_path) as f:
         csv_content = f.read()
 
     metrics = score_output(csv_content, expected_ids)
+    metrics["model"] = resolved_model
     metrics["output_path"] = str(result_path)
     metrics["incidents_path"] = str(incidents_path)
     return metrics

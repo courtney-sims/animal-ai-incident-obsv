@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +9,10 @@ import pytest
 import requests
 
 from incident_fetcher import (
+    LLM_MODEL_DEFAULT,
+    append_llm_meta_column,
     parse_csv,
+    parse_cli_args,
     write_json,
     fetch_csv,
     main,
@@ -296,3 +301,62 @@ def test_collect_data_handles_missing_openalex_abstract(mock_get):
 
     papers = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
     assert papers[0]["abstract"] is None
+
+
+def test_append_llm_meta_column_adds_header_and_values(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text(
+        "aaiid_data_source,json_blob,reasoning,confidence_score\n"
+        'nhtsa_incident_report,{"Report ID":"A1"},duck,High\n'
+        'openalex_work,{"id":"W1"},av animal,Low\n'
+    )
+
+    append_llm_meta_column(csv_path, "opencode/deepseek-v4-flash-free")
+
+    rows = list(csv.reader(io.StringIO(csv_path.read_text())))
+    assert rows[0][-1] == "llm_meta"
+    expected = '{"model":"opencode/deepseek-v4-flash-free"}'
+    assert rows[1][-1] == expected
+    assert rows[2][-1] == expected
+
+
+def test_append_llm_meta_column_overwrites_existing(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text(
+        'aaiid_data_source,llm_meta,json_blob\n'
+        'nhtsa_incident_report,{"model":"stale/model"},{"Report ID":"A1"}\n'
+    )
+
+    append_llm_meta_column(csv_path, "new/model")
+
+    rows = list(csv.reader(io.StringIO(csv_path.read_text())))
+    assert rows[0].count("llm_meta") == 1
+    assert rows[1][1] == '{"model":"new/model"}'
+
+
+def test_append_llm_meta_column_empty_file(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text("")
+
+    append_llm_meta_column(csv_path, "m/x")
+    assert csv_path.read_text() == ""
+
+
+def test_parse_cli_args_empty():
+    assert parse_cli_args([]) == {}
+
+
+def test_parse_cli_args_model():
+    assert parse_cli_args(["model=foo/bar"]) == {"model": "foo/bar"}
+
+
+@patch("incident_fetcher.run_pipeline")
+def test_main_forwards_model_from_cli(mock_pipeline):
+    main(["model=foo/bar"])
+    mock_pipeline.assert_called_once_with(model="foo/bar")
+
+
+@patch("incident_fetcher.run_pipeline")
+def test_main_defaults_model_to_none_when_absent(mock_pipeline):
+    main([])
+    mock_pipeline.assert_called_once_with(model=None)
