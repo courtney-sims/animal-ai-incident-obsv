@@ -15,6 +15,7 @@ An LLM agent (via `opencode run`) reads the combined JSON of entries pulled from
 - `json_blob` — trimmed JSON of the entry
 - `reasoning` — why the entry was included
 - `confidence_score` — High / Medium / Low
+- `llm_meta` — provenance JSON added by the pipeline (currently `{"model": "..."}`)
 
 ## Setup
 
@@ -31,6 +32,19 @@ Requires [opencode](https://opencode.ai) available on `PATH`.
 ```bash
 python incident_fetcher.py
 ```
+
+### Choosing a model
+
+The classification step runs `opencode run -m <model>`. By default the pipeline
+uses `opencode/deepseek-v4-flash-free` — a free-tier model bundled with
+opencode. Override on the command line with a `model=<provider/model>` arg:
+
+```bash
+python incident_fetcher.py model=anthropic/claude-sonnet-4-5
+```
+
+You must have the corresponding provider authenticated (`opencode auth login <provider>`) and the
+model available (`opencode models` to list). The model used for each run is recorded in the `llm_meta` column of every output row.
 
 ## Prompt eval
 
