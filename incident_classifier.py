@@ -16,7 +16,7 @@ a JSON array of entries in the file {incidents_filename}. Each entry has an
 "entry_id" field.
 
 For every entry, decide whether it describes an AI system directly harming a
-non-human animal, or (for openalex_work entries) a paper on that topic.
+non-human animal, or (for openalex_work entries) a paper either related to that topic or whose research generated those harms.
 
 Rules for aaiid_data_source == "nhtsa_incident_report":
 - Keep if "Crash With" is "Animal".

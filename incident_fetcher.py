@@ -216,7 +216,8 @@ def collect_data(now: datetime = datetime.now()) -> list[dict]:
     """
     csv_text = fetch_csv(URL)
     data = parse_csv(csv_text)
-    data = filter_by_date(data, now=now)
+    # Might be relevant later, but for now the csv we have is a constant data source of Jun 2025-May 2026
+    # data = filter_by_date(data, now=now)
     for row in data:
         row["aaiid_data_source"] = "nhtsa_incident_report"
 
