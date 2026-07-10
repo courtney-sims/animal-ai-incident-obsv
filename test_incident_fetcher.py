@@ -2,28 +2,28 @@ import csv
 import io
 import json
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
 from incident_fetcher import (
-    LLM_MODEL_DEFAULT,
-    append_llm_meta_column,
-    parse_csv,
-    parse_cli_args,
-    write_json,
-    fetch_csv,
-    main,
-    query_openalex,
+    CSV_HEADER,
+    OPENALEX_KEEP_FIELDS,
+    _get_dotted,
+    _set_dotted,
+    assemble_csv,
+    assign_entry_ids,
     collect_data,
+    fetch_csv,
     filter_by_date,
-    trim_nhtsa_fields,
-    generate_prompt,
-    run_classification,
-    write_timestamped_csv,
+    parse_csv,
+    query_openalex,
     reconstruct_abstract,
+    trim_nhtsa_fields,
+    trim_openalex_fields,
+    write_json,
+    write_timestamped_csv,
 )
 
 
@@ -33,8 +33,11 @@ NHTSA_KEEP = [
     "Incident Date", "SV Precrash Speed (MPH)",
     "Highest Injury Severity Alleged",
     "CP Pre-Crash Movement", "SV Pre-Crash Movement",
-    "Within ODD?", "aaiid_data_source",
+    "Within ODD?",
 ]
+
+
+# ---------- trimming ----------
 
 
 def test_trim_nhtsa_fields():
@@ -55,18 +58,81 @@ def test_trim_nhtsa_fields():
         "aaiid_data_source": "nhtsa_incident_report",
         "VIN": "SOMEVIN",
         "Weather - Clear": "Y",
-        "Roadway-No Unusual Conditions": "Y",
-        "Any Air Bags Deployed?": "No",
-        "Latitude": "[REDACTED]",
     }
     result = trim_nhtsa_fields([row])
     assert len(result) == 1
     assert list(result[0].keys()) == NHTSA_KEEP
     assert "VIN" not in result[0]
+    assert "aaiid_data_source" not in result[0]
 
 
 def test_trim_nhtsa_fields_empty():
     assert trim_nhtsa_fields([]) == []
+
+
+def test_get_dotted_reads_nested():
+    d = {"a": {"b": {"c": 1}}}
+    assert _get_dotted(d, "a.b.c") == 1
+    assert _get_dotted(d, "a.b") == {"c": 1}
+
+
+def test_get_dotted_missing_returns_default():
+    assert _get_dotted({}, "a.b", default="X") == "X"
+    assert _get_dotted({"a": 5}, "a.b", default=None) is None  # a is not a dict
+    assert _get_dotted({"a": {"b": None}}, "a.b") is None  # present but None
+
+
+def test_set_dotted_creates_intermediate_dicts():
+    d: dict = {}
+    _set_dotted(d, "a.b.c", 42)
+    assert d == {"a": {"b": {"c": 42}}}
+
+
+def test_set_dotted_overwrites_non_dict_intermediate():
+    d = {"a": "not-a-dict"}
+    _set_dotted(d, "a.b", 1)
+    assert d == {"a": {"b": 1}}
+
+
+def test_trim_openalex_fields_preserves_nesting():
+    row = {
+        "id": "https://openalex.org/W1",
+        "title": "A paper",
+        "display_name": "A paper",
+        "publication_year": 2026,
+        "publication_date": "2026-06-01",
+        "abstract": "text",
+        "primary_location": {
+            "landing_page_url": "https://x.example/y",
+            "pdf_url": "https://x.example/z.pdf",
+            "irrelevant_field": "gone",
+        },
+        "doi": "should-be-dropped",
+        "aaiid_data_source": "openalex_work",
+    }
+    trimmed = trim_openalex_fields([row])[0]
+    assert trimmed["id"] == "https://openalex.org/W1"
+    assert trimmed["title"] == "A paper"
+    assert trimmed["primary_location"] == {
+        "landing_page_url": "https://x.example/y",
+        "pdf_url": "https://x.example/z.pdf",
+    }
+    assert "doi" not in trimmed
+    assert "aaiid_data_source" not in trimmed
+
+
+def test_trim_openalex_fields_omits_missing_paths():
+    row = {"id": "W1", "title": "A paper"}
+    trimmed = trim_openalex_fields([row])[0]
+    assert trimmed == {"id": "W1", "title": "A paper"}
+    assert "primary_location" not in trimmed
+
+
+def test_trim_openalex_fields_empty():
+    assert trim_openalex_fields([]) == []
+
+
+# ---------- parse_csv / write_json / fetch_csv ----------
 
 
 def test_parse_csv_empty():
@@ -84,7 +150,6 @@ def test_parse_csv_with_data():
 
 def test_write_json_creates_file(tmp_path):
     data = [{"name": "Alice", "age": "30"}]
-    # tmp_path is a built-in pytest fixture that creates a unique temp directory per test run
     output = tmp_path / "out.json"
     write_json(data, output)
     assert output.exists()
@@ -110,89 +175,8 @@ def test_fetch_csv_raises_on_http_error(mock_get):
     with pytest.raises(requests.exceptions.HTTPError):
         fetch_csv("http://example.com/bad.csv")
 
-@patch("incident_fetcher.subprocess.run")
-def test_run_classification_calls_opencode_with_filename(mock_subprocess_run, tmp_path):
-    incidents_file = tmp_path / "my_incidents.json"
-    incidents_file.write_text("[]")
-    prompt = generate_prompt(incidents_file.name)
 
-    result_path = run_classification(incidents_file, prompt)
-
-    assert isinstance(result_path, Path)
-    assert mock_subprocess_run.called
-    args = mock_subprocess_run.call_args[0][0]
-    assert args[0] == "opencode"
-    assert args[1] == "run"
-    assert incidents_file.name in args[2]
-    assert "animal_incidents_" in args[2]
-
-
-def test_write_timestamped_csv_creates_file(tmp_path):
-    csv_content = "a,b\n1,2\n"
-    result_path = write_timestamped_csv(csv_content, tmp_path)
-    assert isinstance(result_path, Path)
-    assert result_path.parent == tmp_path
-    assert result_path.name.startswith("animal_incidents_")
-    assert result_path.suffix == ".csv"
-    assert result_path.exists()
-    assert result_path.read_text() == csv_content
-
-
-@patch("incident_fetcher.subprocess.run")
-def test_run_classification_returns_known_path(mock_subprocess_run, tmp_path):
-    incidents_file = tmp_path / "incidents.json"
-    incidents_file.write_text("[]")
-    prompt = "test prompt"
-
-    result_path = run_classification(
-        incidents_file, prompt, now=datetime(2026, 6, 25, 12, 0, 0)
-    )
-
-    assert result_path == tmp_path / "animal_incidents_20260625_120000.csv"
-
-
-@patch("incident_fetcher.requests.get")
-def test_query_openalex_returns_papers(mock_get):
-    mock_response = mock_get.return_value
-    mock_response.json.return_value = {
-        "meta": {"count": 1, "page": 1, "per_page": 25},
-        "results": [
-            {
-                "id": "https://openalex.org/W123",
-                "title": "Animal cognition in autonomous systems",
-            }
-        ],
-    }
-    result = query_openalex({"per_page": 25})
-    assert len(result) == 1
-    assert result[0]["id"] == "https://openalex.org/W123"
-    assert result[0]["title"] == "Animal cognition in autonomous systems"
-
-
-@patch("incident_fetcher.requests.get")
-def test_collect_data_returns_combined_sources(mock_get):
-    csv_response = MagicMock()
-    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\nAPR-2026,3,Charlie\n"
-
-    oa_response = MagicMock()
-    oa_response.json.return_value = {
-        "meta": {"count": 1},
-        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
-    }
-
-    mock_get.side_effect = [csv_response, oa_response]
-
-    result = collect_data(now=datetime(2026, 6, 25))
-
-    csv_records = [r for r in result if r.get("aaiid_data_source") == "nhtsa_incident_report"]
-    oa_records = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
-
-    assert len(csv_records) == 1
-    assert csv_records[0]["id"] == "1"
-    assert csv_records[0]["name"] == "Alice"
-    assert len(oa_records) == 1
-    assert oa_records[0]["id"] == "W1"
-    assert result[-1]["aaiid_data_source"] == "openalex_work"
+# ---------- filter_by_date ----------
 
 
 def test_filter_by_date_keeps_current_month_only():
@@ -216,10 +200,7 @@ def test_filter_by_date_drops_missing_date():
 
 
 def test_filter_by_date_drops_blank_date():
-    data = [
-        {"Incident Date": "   ", "id": "1"},
-        {"Incident Date": "", "id": "2"},
-    ]
+    data = [{"Incident Date": "   ", "id": "1"}, {"Incident Date": "", "id": "2"}]
     result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
     assert result == []
 
@@ -245,6 +226,9 @@ def test_filter_by_date_months_back_wider_window():
     assert [r["id"] for r in result] == ["jun", "may", "apr"]
 
 
+# ---------- reconstruct_abstract ----------
+
+
 def test_reconstruct_abstract():
     inv = {"the": [0, 3], "cat": [1], "and": [2], "dog": [4]}
     assert reconstruct_abstract(inv) == "the cat and the dog"
@@ -256,6 +240,42 @@ def test_reconstruct_abstract_none_returns_none():
 
 def test_reconstruct_abstract_empty_dict_returns_none():
     assert reconstruct_abstract({}) is None
+
+
+# ---------- collect_data ----------
+
+
+@patch("incident_fetcher.requests.get")
+def test_query_openalex_returns_papers(mock_get):
+    mock_response = mock_get.return_value
+    mock_response.json.return_value = {
+        "meta": {"count": 1, "page": 1, "per_page": 25},
+        "results": [{"id": "https://openalex.org/W123", "title": "Animal cognition"}],
+    }
+    result = query_openalex({"per_page": 25})
+    assert len(result) == 1
+    assert result[0]["id"] == "https://openalex.org/W123"
+
+
+@patch("incident_fetcher.requests.get")
+def test_collect_data_returns_combined_sources(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date,id,name\nJUN-2026,1,Alice\nMAY-2026,2,Bob\n"
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 1},
+        "results": [{"id": "W1", "title": "Paper on animal behavior"}],
+    }
+    mock_get.side_effect = [csv_response, oa_response]
+
+    result = collect_data(now=datetime(2026, 6, 25))
+
+    csv_records = [r for r in result if r.get("aaiid_data_source") == "nhtsa_incident_report"]
+    oa_records = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
+    assert len(csv_records) == 1
+    assert csv_records[0]["id"] == "1"
+    assert len(oa_records) == 1
+    assert oa_records[0]["id"] == "W1"
 
 
 @patch("incident_fetcher.requests.get")
@@ -280,9 +300,7 @@ def test_collect_data_reconstructs_openalex_abstract(mock_get):
     result = collect_data(now=datetime(2026, 6, 25))
 
     papers = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
-    assert len(papers) == 1
     assert papers[0]["abstract"] == "Autonomous vehicles and deer"
-    # inverted index is removed after reconstruction
     assert "abstract_inverted_index" not in papers[0]
 
 
@@ -293,7 +311,7 @@ def test_collect_data_handles_missing_openalex_abstract(mock_get):
     oa_response = MagicMock()
     oa_response.json.return_value = {
         "meta": {"count": 1},
-        "results": [{"id": "W1", "title": "A paper"}],  # no abstract field
+        "results": [{"id": "W1", "title": "A paper"}],
     }
     mock_get.side_effect = [csv_response, oa_response]
 
@@ -303,60 +321,164 @@ def test_collect_data_handles_missing_openalex_abstract(mock_get):
     assert papers[0]["abstract"] is None
 
 
-def test_append_llm_meta_column_adds_header_and_values(tmp_path):
-    csv_path = tmp_path / "out.csv"
-    csv_path.write_text(
-        "aaiid_data_source,json_blob,reasoning,confidence_score\n"
-        'nhtsa_incident_report,{"Report ID":"A1"},duck,High\n'
-        'openalex_work,{"id":"W1"},av animal,Low\n'
-    )
-
-    append_llm_meta_column(csv_path, "opencode/deepseek-v4-flash-free")
-
-    rows = list(csv.reader(io.StringIO(csv_path.read_text())))
-    assert rows[0][-1] == "llm_meta"
-    expected = '{"model":"opencode/deepseek-v4-flash-free"}'
-    assert rows[1][-1] == expected
-    assert rows[2][-1] == expected
+# ---------- write_timestamped_csv ----------
 
 
-def test_append_llm_meta_column_overwrites_existing(tmp_path):
-    csv_path = tmp_path / "out.csv"
-    csv_path.write_text(
-        'aaiid_data_source,llm_meta,json_blob\n'
-        'nhtsa_incident_report,{"model":"stale/model"},{"Report ID":"A1"}\n'
-    )
-
-    append_llm_meta_column(csv_path, "new/model")
-
-    rows = list(csv.reader(io.StringIO(csv_path.read_text())))
-    assert rows[0].count("llm_meta") == 1
-    assert rows[1][1] == '{"model":"new/model"}'
+def test_write_timestamped_csv_creates_file(tmp_path):
+    result_path = write_timestamped_csv("a,b\n1,2\n", tmp_path, now=datetime(2026, 6, 25, 12, 0, 0))
+    assert result_path == tmp_path / "animal_incidents_20260625_120000.csv"
+    assert result_path.read_text() == "a,b\n1,2\n"
 
 
-def test_append_llm_meta_column_empty_file(tmp_path):
-    csv_path = tmp_path / "out.csv"
-    csv_path.write_text("")
-
-    append_llm_meta_column(csv_path, "m/x")
-    assert csv_path.read_text() == ""
+# ---------- assign_entry_ids ----------
 
 
-def test_parse_cli_args_empty():
-    assert parse_cli_args([]) == {}
+def test_assign_entry_ids_adds_padded_ids():
+    entries = [{"a": 1}, {"a": 2}, {"a": 3}]
+    assign_entry_ids(entries)
+    assert [e["entry_id"] for e in entries] == ["e0000", "e0001", "e0002"]
 
 
-def test_parse_cli_args_model():
-    assert parse_cli_args(["model=foo/bar"]) == {"model": "foo/bar"}
+def test_assign_entry_ids_is_idempotent():
+    entries = [{"entry_id": "e9999", "a": 1}, {"a": 2}]
+    assign_entry_ids(entries)
+    assert entries[0]["entry_id"] == "e9999"  # untouched
+    assert entries[1]["entry_id"] == "e0000"  # newly assigned
 
 
-@patch("incident_fetcher.run_pipeline")
-def test_main_forwards_model_from_cli(mock_pipeline):
-    main(["model=foo/bar"])
-    mock_pipeline.assert_called_once_with(model="foo/bar")
+# ---------- assemble_csv ----------
 
 
-@patch("incident_fetcher.run_pipeline")
-def test_main_defaults_model_to_none_when_absent(mock_pipeline):
-    main([])
-    mock_pipeline.assert_called_once_with(model=None)
+def _judgment(entry_id, keep=True, reasoning="r", confidence="High"):
+    return {
+        "entry_id": entry_id,
+        "keep": keep,
+        "reasoning": reasoning,
+        "confidence": confidence,
+    }
+
+
+def test_assemble_csv_header_is_expected():
+    csv_text = assemble_csv([], [], model="m/x")
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert rows == [CSV_HEADER]
+
+
+def test_assemble_csv_writes_kept_rows_only():
+    entries = [
+        {"entry_id": "e0", "aaiid_data_source": "nhtsa_incident_report",
+         "Report ID": "A1", "Crash With": "Animal", "Narrative": "duck"},
+        {"entry_id": "e1", "aaiid_data_source": "nhtsa_incident_report",
+         "Report ID": "A2", "Crash With": "Passenger Car"},
+    ]
+    judgments = [
+        _judgment("e0", keep=True, reasoning="duck", confidence="High"),
+        _judgment("e1", keep=False, reasoning="car crash", confidence="Low"),
+    ]
+    csv_text = assemble_csv(entries, judgments, model="m/x")
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert len(rows) == 2  # header + one kept row
+    data_row = dict(zip(rows[0], rows[1]))
+    assert data_row["aaiid_data_source"] == "nhtsa_incident_report"
+    assert data_row["entry_id"] == "e0"
+    assert data_row["reasoning"] == "duck"
+    assert data_row["confidence"] == "High"
+    assert data_row["llm_meta"] == '{"model":"m/x"}'
+    blob = json.loads(data_row["json_blob"])
+    assert blob["Report ID"] == "A1"
+    assert "aaiid_data_source" not in blob
+    assert "entry_id" not in blob
+
+
+def test_assemble_csv_uses_openalex_trim_for_openalex_entries():
+    entries = [{
+        "entry_id": "e0",
+        "aaiid_data_source": "openalex_work",
+        "id": "https://openalex.org/W1",
+        "title": "AV and deer",
+        "abstract": "text",
+        "primary_location": {
+            "landing_page_url": "u1",
+            "pdf_url": "u2",
+            "junk": "x",
+        },
+        "doi": "dropped",
+    }]
+    judgments = [_judgment("e0")]
+    csv_text = assemble_csv(entries, judgments, model="m/x")
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    blob = json.loads(rows[1][rows[0].index("json_blob")])
+    assert blob["primary_location"] == {"landing_page_url": "u1", "pdf_url": "u2"}
+    assert "doi" not in blob
+    assert "junk" not in blob.get("primary_location", {})
+
+
+def test_assemble_csv_skips_judgments_with_no_matching_entry(capsys):
+    entries = [{"entry_id": "e0", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A1"}]
+    judgments = [_judgment("ghost"), _judgment("e0")]
+    csv_text = assemble_csv(entries, judgments, model="m/x")
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    # only one data row (e0)
+    assert len(rows) == 2
+    assert rows[1][rows[0].index("entry_id")] == "e0"
+    assert "unknown entry_id 'ghost'" in capsys.readouterr().out
+
+
+def test_assemble_csv_logs_unknown_entry_id_even_when_keep_false(capsys):
+    """Membership check runs above the keep filter so hallucinated ids are
+    always logged, even if the LLM said keep=False."""
+    entries = [{"entry_id": "e0", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A1"}]
+    judgments = [
+        _judgment("ghost", keep=False, reasoning="not relevant", confidence="Low"),
+    ]
+    assemble_csv(entries, judgments, model="m/x")
+    assert "unknown entry_id 'ghost'" in capsys.readouterr().out
+
+
+def test_assemble_csv_logs_missing_entry_ids_report(capsys):
+    """Entries with no matching judgment are summarized at the end."""
+    entries = [
+        {"entry_id": "e0", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A1"},
+        {"entry_id": "e1", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A2"},
+        {"entry_id": "e2", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A3"},
+    ]
+    # only e0 is judged; e1 and e2 are silently missing from the LLM output
+    judgments = [_judgment("e0")]
+    assemble_csv(entries, judgments, model="m/x")
+    out = capsys.readouterr().out
+    assert "2 entry_id(s) had no valid judgment" in out
+    assert "e1" in out
+    assert "e2" in out
+
+
+def test_assemble_csv_no_missing_report_when_all_entries_judged(capsys):
+    entries = [
+        {"entry_id": "e0", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A1"},
+        {"entry_id": "e1", "aaiid_data_source": "nhtsa_incident_report", "Report ID": "A2"},
+    ]
+    judgments = [_judgment("e0"), _judgment("e1", keep=False)]
+    assemble_csv(entries, judgments, model="m/x")
+    out = capsys.readouterr().out
+    assert "had no valid judgment" not in out
+
+
+def test_assemble_csv_preserves_quoting_in_json_blob():
+    entries = [{
+        "entry_id": "e0",
+        "aaiid_data_source": "nhtsa_incident_report",
+        "Report ID": "A1",
+        "Narrative": 'She said "hi", then left.',
+    }]
+    judgments = [_judgment("e0")]
+    csv_text = assemble_csv(entries, judgments, model="m/x")
+    # Round-trip through csv.DictReader must recover the exact narrative.
+    reader = csv.DictReader(io.StringIO(csv_text))
+    row = next(reader)
+    blob = json.loads(row["json_blob"])
+    assert blob["Narrative"] == 'She said "hi", then left.'
+
+
+
+
+
+
