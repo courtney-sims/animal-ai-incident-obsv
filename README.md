@@ -10,12 +10,19 @@ Data sources currently included:
 1. **NHTSA SGO-2021-01** — Standing General Order crash reports from AV operators (Waymo, Tesla, Zoox, Avride, etc.).
 2. **OpenAlex** — Academic works matching a search for `"animal"`, filtered to the last 30 days.
 
-An LLM agent (via `opencode run`) reads the combined JSON of entries pulled from the data sources, classifies each entry as animal&AI-related or not, and writes relevant entries to `animal_incidents_<TIMESTAMP>.csv` with columns:
-- `aaiid_data_source` — `nhtsa_incident_report` or `openalex_work`
-- `json_blob` — trimmed JSON of the entry
-- `reasoning` — why the entry was included
-- `confidence_score` — High / Medium / Low
-- `llm_meta` — provenance JSON added by the pipeline (currently `{"model": "..."}`)
+The pipeline runs in three steps:
+
+1. **Collect.** Python fetches from NHTSA and OpenAlex, tags each entry with its source, and assigns a synthetic `entry_id`.
+2. **Classify.** An LLM agent (via `opencode run`) reads the combined JSON and writes a JSON array of judgments — one per input entry — with fields `entry_id`, `keep`, `reasoning`, `confidence`. The LLM only classifies; it does not write the final CSV.
+3. **Assemble.** Python joins entries with judgments, trims fields per source, and writes `animal_incidents_<TIMESTAMP>.csv` with columns:
+   - `aaiid_data_source` — `nhtsa_incident_report` or `openalex_work`
+   - `entry_id` — synthetic ID linking back to the input
+   - `json_blob` — trimmed JSON of the entry
+   - `reasoning` — why the entry was included
+   - `confidence` — `High` / `Medium` / `Low`
+   - `llm_meta` — provenance JSON, currently `{"model": "..."}`
+
+Judgments that fail validation (bad shape, unknown `entry_id`, duplicates, missing fields) are logged to stdout and skipped. The pipeline does not abort on validation problems, but affected entries simply won't appear in the CSV.
 
 ## Setup
 
@@ -69,7 +76,7 @@ python -m pytest -v
 ## Project structure
 
 ```
-incident_fetcher.py     — data collection, field trimming, prompt generation, opencode runner
+incident_fetcher.py     — collection, entry ids, classify (LLM), assemble_csv, pipeline
 prompt_eval.py          — test data builder, scoring metrics, eval orchestrator
 test_incident_fetcher.py
 test_prompt_eval.py

@@ -2,12 +2,15 @@ import csv
 import io
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
+from incident_classifier import LLM_MODEL_DEFAULT, classify
 from incident_fetcher import (
-    LLM_MODEL_DEFAULT,
-    generate_prompt,
-    run_classification,
+    assemble_csv,
+    assign_entry_ids,
+    write_json,
+    write_timestamped_csv,
 )
 
 
@@ -76,20 +79,25 @@ def run_eval(output_dir: str | None = None, model: str | None = None) -> dict:
     incidents, expected_ids = build_test_data()
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
-    incidents_path = Path(output_dir) / "test_incidents.json"
-    with open(incidents_path, "w") as f:
-        json.dump(incidents, f)
+    workdir = Path(output_dir)
 
+    assign_entry_ids(incidents)
     resolved_model = model or LLM_MODEL_DEFAULT
-    prompt = generate_prompt(incidents_path.name)
-    result_path = run_classification(incidents_path, prompt, model=resolved_model)
-    with open(result_path) as f:
-        csv_content = f.read()
+    now = datetime.now()
 
-    metrics = score_output(csv_content, expected_ids)
+    incidents_path = workdir / "eval_incidents.json"
+    judgments_path = workdir / "eval_judgments.json"
+    write_json(incidents, incidents_path)
+
+    resolved_model, judgments = classify(
+        workdir, incidents_path, judgments_path, model=resolved_model
+    )
+    csv_text = assemble_csv(incidents, judgments, resolved_model)
+    result_path = write_timestamped_csv(csv_text, directory=workdir, now=now)
+
+    metrics = score_output(csv_text, expected_ids)
     metrics["model"] = resolved_model
     metrics["output_path"] = str(result_path)
-    metrics["incidents_path"] = str(incidents_path)
     return metrics
 
 
