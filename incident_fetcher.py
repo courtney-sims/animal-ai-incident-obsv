@@ -6,16 +6,9 @@ from pathlib import Path
 
 import requests
 import tablib
-<<<<<<< Updated upstream
-from typing import TYPE_CHECKING
-from classifier_types import Judgment
-=======
 
-<<<<<<< Updated upstream
-=======
 from classifier_types import Judgment
->>>>>>> Stashed changes
->>>>>>> Stashed changes
+
 
 URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
 OUTPUT_PATH = Path("incidents.json")
