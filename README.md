@@ -37,7 +37,7 @@ Requires [opencode](https://opencode.ai) available on `PATH`.
 ## Usage
 
 ```bash
-python incident_fetcher.py
+python main.py
 ```
 
 ### Choosing a model
@@ -73,6 +73,7 @@ source .venv/bin/activate
 python -m pytest -v
 ```
 
+<<<<<<< Updated upstream
 ## Project structure
 
 ```
@@ -82,3 +83,5 @@ test_incident_fetcher.py
 test_prompt_eval.py
 requirements.txt
 ```
+=======
+>>>>>>> Stashed changes
