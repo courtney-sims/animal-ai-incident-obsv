@@ -36,11 +36,21 @@ Requires [opencode](https://opencode.ai) available on `PATH`.
 
 ## Usage
 
+### Observatory App
+
 ```bash
-python main.py
+python obsv/manage.py runserver
 ```
 
-### Choosing a model
+Go to http://127.0.0.1:8000/ in browser.
+
+### Data Pipeline
+
+```bash
+python pipeline/main.py
+```
+
+#### Choosing a model
 
 The classification step runs `opencode run -m <model>`. By default the pipeline
 uses `opencode/deepseek-v4-flash-free` — a free-tier model bundled with
@@ -73,15 +83,3 @@ source .venv/bin/activate
 python -m pytest -v
 ```
 
-<<<<<<< Updated upstream
-## Project structure
-
-```
-incident_fetcher.py     — collection, entry ids, classify (LLM), assemble_csv, pipeline
-prompt_eval.py          — test data builder, scoring metrics, eval orchestrator
-test_incident_fetcher.py
-test_prompt_eval.py
-requirements.txt
-```
-=======
->>>>>>> Stashed changes
