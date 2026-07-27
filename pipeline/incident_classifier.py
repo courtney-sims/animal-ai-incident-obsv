@@ -4,7 +4,7 @@ import subprocess
 
 from typing import Tuple
 
-from classifier_types import Judgment, VALID_CONFIDENCES
+from pipeline.classifier_types import Judgment, VALID_CONFIDENCES
 
 # Default LLM used for relevance classification.
 LLM_MODEL_DEFAULT = "opencode/deepseek-v4-flash-free"

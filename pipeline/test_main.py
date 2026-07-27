@@ -2,14 +2,14 @@ from unittest.mock import patch
 
 import pytest
 
-from main import main, parse_cli_args
+from pipeline.main import main, parse_cli_args
 
-@patch("main.run_pipeline")
+@patch("pipeline.main.run_pipeline")
 def test_main_forwards_model_from_cli(mock_pipeline):
     main(["model=foo/bar"])
     mock_pipeline.assert_called_once_with(model="foo/bar")
 
-@patch("main.run_pipeline")
+@patch("pipeline.main.run_pipeline")
 def test_main_defaults_model_to_none_when_absent(mock_pipeline):
     main([])
     mock_pipeline.assert_called_once_with(model=None)
