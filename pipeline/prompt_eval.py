@@ -1,16 +1,11 @@
-import csv
-import io
-import json
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
-from incident_classifier import LLM_MODEL_DEFAULT, classify
-from incident_fetcher import (
-    assemble_csv,
+from pipeline.incident_classifier import LLM_MODEL_DEFAULT, classify
+from pipeline.incident_fetcher import (
     assign_entry_ids,
+    build_records,
     write_json,
-    write_timestamped_csv,
 )
 
 
@@ -68,11 +63,8 @@ def build_test_data() -> tuple[list[dict], set[str]]:
     return incidents, expected
 
 
-def _extract_id(blob: dict) -> str:
-    if "Report ID" in blob:
-        return blob["Report ID"]
-    oid = blob.get("id", "")
-    return oid.replace("https://openalex.org/", "")
+def _extract_id(source_id: str) -> str:
+    return source_id.replace("https://openalex.org/", "")
 
 
 def run_eval(output_dir: str | None = None, model: str | None = None) -> dict:
@@ -83,7 +75,6 @@ def run_eval(output_dir: str | None = None, model: str | None = None) -> dict:
 
     assign_entry_ids(incidents)
     resolved_model = model or LLM_MODEL_DEFAULT
-    now = datetime.now()
 
     incidents_path = workdir / "eval_incidents.json"
     judgments_path = workdir / "eval_judgments.json"
@@ -92,21 +83,17 @@ def run_eval(output_dir: str | None = None, model: str | None = None) -> dict:
     resolved_model, judgments = classify(
         workdir, incidents_path, judgments_path, model=resolved_model
     )
-    csv_text = assemble_csv(incidents, judgments, resolved_model)
-    result_path = write_timestamped_csv(csv_text, directory=workdir, now=now)
+    records = build_records(incidents, judgments, resolved_model)
 
-    metrics = score_output(csv_text, expected_ids)
+    metrics = score_output(records, expected_ids)
     metrics["model"] = resolved_model
-    metrics["output_path"] = str(result_path)
     return metrics
 
 
-def score_output(generated_csv: str, expected_ids: set[str]) -> dict:
-    reader = csv.DictReader(io.StringIO(generated_csv))
+def score_output(records: list[dict], expected_ids: set[str]) -> dict:
     found_ids = set()
-    for row in reader:
-        blob = json.loads(row["json_blob"])
-        found_ids.add(_extract_id(blob))
+    for record in records:
+        found_ids.add(_extract_id(record["source_id"]))
 
     true_positives = found_ids & expected_ids
     false_positives = found_ids - expected_ids

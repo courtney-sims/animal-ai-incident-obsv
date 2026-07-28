@@ -2,8 +2,8 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
-import incident_classifier
-import incident_fetcher
+from pipeline import incident_classifier
+from pipeline import incident_fetcher
 
 
 def parse_cli_args(argv: list[str]) -> dict:
@@ -43,8 +43,14 @@ def run_pipeline(
     model: str | None = None,
     now: datetime | None = None,
     workdir: Path | None = None,
-) -> Path:
-    """Collect, classify, and write the final CSV. Returns the CSV path."""
+) -> tuple[list[dict], str]:
+    """Collect and classify data; return the kept records and resolved model.
+
+    Writes the intermediate ``incidents``/``judgments`` JSON files into
+    ``workdir`` (these are the IPC channel with the ``opencode`` subprocess) and
+    returns ``(records, model)`` where ``records`` are the reconciled, trimmed
+    kept judgments as produced by :func:`incident_fetcher.build_records`.
+    """
     if now is None:
         now = datetime.now()
     if workdir is None:
@@ -55,9 +61,9 @@ def run_pipeline(
     incident_fetcher.assign_entry_ids(entries)
     incidents_path, judgments_path = get_data_paths(workdir)
     incident_fetcher.write_json(entries, incidents_path)
-    model,judgments = incident_classifier.classify(workdir, incidents_path, judgments_path, model)
-    csv_text = incident_fetcher.assemble_csv(entries, judgments, model=model)
-    return incident_fetcher.write_timestamped_csv(csv_text, directory=workdir, now=now)
+    model, judgments = incident_classifier.classify(workdir, incidents_path, judgments_path, model)
+    records = incident_fetcher.build_records(entries, judgments, model=model)
+    return records, model
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_cli_args(argv if argv is not None else sys.argv[1:])
@@ -65,3 +71,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

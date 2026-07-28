@@ -1,5 +1,3 @@
-import csv
-import io
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,7 +5,7 @@ from pathlib import Path
 import requests
 import tablib
 
-from classifier_types import Judgment
+from pipeline.classifier_types import Judgment
 
 
 URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
@@ -255,13 +253,11 @@ def assign_entry_ids(entries: list[dict], start: int = 0) -> None:
             counter += 1
 
 
-# ---------- CSV output ----------
+# ---------- Record assembly ----------
 
 
-CSV_HEADER = ["aaiid_data_source", "entry_id", "json_blob", "reasoning", "confidence", "llm_meta"]
-
-# Fields to strip from the trimmed json_blob because they are already present
-# as their own CSV columns (avoid duplication in the cell).
+# Fields to strip from the trimmed json_blob because they are internal
+# bookkeeping, not source data.
 _JSON_BLOB_STRIP = {"aaiid_data_source", "entry_id"}
 
 
@@ -277,37 +273,40 @@ def _trim_entry(entry: dict) -> dict:
     return {k: v for k, v in trimmed.items() if k not in _JSON_BLOB_STRIP}
 
 
-def write_timestamped_csv(
-    content: str,
-    directory: Path = Path("."),
-    now: datetime = datetime.now(),
-) -> Path:
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    path = Path(directory) / f"animal_incidents_{timestamp}.csv"
-    path.write_text(content)
-    return path
+def _source_id(entry: dict) -> str:
+    """Return the source's natural key for ``entry``.
+
+    NHTSA rows are keyed by ``Report ID``; OpenAlex works by ``id``. Falls back
+    to an empty string when the expected key is absent.
+    """
+    source = entry.get("aaiid_data_source")
+    if source == "nhtsa_incident_report":
+        return entry.get("Report ID", "") or ""
+    if source == "openalex_work":
+        return entry.get("id", "") or ""
+    return ""
 
 
-def assemble_csv(
+def build_records(
     entries: list[dict],
     judgments: list[Judgment],
     model: str,
-) -> str:
-    """Join entries with judgments and emit the final CSV as a string.
+) -> list[dict]:
+    """Join entries with kept judgments and return structured records.
 
-    This step also performs the entry-aware reconciliation:
+    Performs the entry-aware reconciliation:
       - Unknown ``entry_id`` values (not present in ``entries``) are logged and
         skipped.
+      - Judgments with ``keep`` falsey are dropped.
       - A summary of ``entry_id`` values that received no valid judgment is
         printed at the end.
+
+    Each returned record is a dict with the trimmed source data under
+    ``json_blob`` plus the judgment fields, ready to be persisted or scored.
     """
     entries_by_id = {e["entry_id"]: e for e in entries if "entry_id" in e}
-    llm_meta = json.dumps({"model": model}, separators=(",", ":"))
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(CSV_HEADER)
-
+    records: list[dict] = []
     seen_ids: set[str] = set()
 
     for j in judgments:
@@ -317,32 +316,32 @@ def assemble_csv(
         # logged.
         if entry is None:
             print(
-                f"assemble_csv: judgment has unknown entry_id {entry_id!r} "
+                f"build_records: judgment has unknown entry_id {entry_id!r} "
                 f"(not among {len(entries_by_id)} input entries); skipping"
             )
             continue
         seen_ids.add(entry_id)
         if not j.get("keep"):
             continue
-        trimmed = _trim_entry(entry)
-        writer.writerow([
-            entry.get("aaiid_data_source", ""),
-            entry_id,
-            json.dumps(trimmed, separators=(",", ":")),
-            j.get("reasoning", ""),
-            j.get("confidence", ""),
-            llm_meta,
-        ])
+        records.append({
+            "aaiid_data_source": entry.get("aaiid_data_source", ""),
+            "entry_id": entry_id,
+            "source_id": _source_id(entry),
+            "json_blob": _trim_entry(entry),
+            "reasoning": j.get("reasoning", ""),
+            "confidence": j.get("confidence", ""),
+            "model": model,
+        })
 
     missing = set(entries_by_id) - seen_ids
     if missing:
         sample = sorted(missing)[:5]
         print(
-            f"assemble_csv: {len(missing)} entry_id(s) had no valid judgment "
-            f"(will be omitted from the CSV); sample: {sample}"
+            f"build_records: {len(missing)} entry_id(s) had no valid judgment "
+            f"(will be omitted); sample: {sample}"
         )
 
-    return buf.getvalue()
+    return records
 
 
 

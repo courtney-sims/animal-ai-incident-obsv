@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from incident_classifier import (
+from pipeline.incident_classifier import (
     LLM_MODEL_DEFAULT,
     classify,
     generate_prompt,
@@ -40,7 +40,7 @@ def test_generate_prompt_mentions_both_filenames():
 # ---------- classify (LLM invocation + return shape) ----------
 
 
-@patch("incident_classifier.subprocess.run")
+@patch("pipeline.incident_classifier.subprocess.run")
 def test_classify_returns_model_and_judgments(mock_run, tmp_path):
     incidents_path = tmp_path / "incidents.json"
     judgments_path = tmp_path / "judgments.json"
@@ -58,7 +58,7 @@ def test_classify_returns_model_and_judgments(mock_run, tmp_path):
     )
 
 
-@patch("incident_classifier.subprocess.run")
+@patch("pipeline.incident_classifier.subprocess.run")
 def test_classify_passes_model_flag(mock_run, tmp_path):
     incidents_path = tmp_path / "incidents.json"
     judgments_path = tmp_path / "judgments.json"
@@ -72,7 +72,7 @@ def test_classify_passes_model_flag(mock_run, tmp_path):
     assert args[args.index("-m") + 1] == "foo/bar"
 
 
-@patch("incident_classifier.subprocess.run")
+@patch("pipeline.incident_classifier.subprocess.run")
 def test_classify_uses_default_model_when_none(mock_run, tmp_path):
     incidents_path = tmp_path / "incidents.json"
     judgments_path = tmp_path / "judgments.json"

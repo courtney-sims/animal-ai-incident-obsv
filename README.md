@@ -34,6 +34,29 @@ pip install -r requirements.txt
 
 Requires [opencode](https://opencode.ai) available on `PATH`.
 
+### Local database setup
+
+#### Installation
+```bash
+sudo apt install postgresql
+sudo apt install postgresql-client-common
+```
+
+#### Configuration
+```bash
+sudo -u postgres psql
+```
+
+```psql
+CREATE DATABASE animal_ai_obsv;
+CREATE USER admin WITH PASSWORD 'test';
+GRANT ALL PRIVILEGES ON DATABASE animal_ai_obsv TO admin;
+```
+
+```bash
+python manage.py migrate
+```
+
 ## Usage
 
 ### Observatory App
@@ -43,6 +66,12 @@ python obsv/manage.py runserver
 ```
 
 Go to http://127.0.0.1:8000/ in browser.
+
+#### Django API
+
+```bash
+python manage.py shell
+```
 
 ### Data Pipeline
 
@@ -62,6 +91,30 @@ python incident_fetcher.py model=anthropic/claude-sonnet-4-5
 
 You must have the corresponding provider authenticated (`opencode auth login <provider>`) and the
 model available (`opencode models` to list). The model used for each run is recorded in the `llm_meta` column of every output row.
+
+### Database
+From the obsv/ directory:
+
+```bash
+sudo -u postgres psql
+```
+
+#### Create Migrations
+
+```bash
+python manage.py makemigrations dash
+```
+
+#### Review Migrations
+```bash
+python manage.py sqlmigrate dash insert-mig-num-here
+python manage.py check
+```
+
+#### Apply Migrations
+```bash
+python manage.py migrate
+```
 
 ## Prompt eval
 
