@@ -92,6 +92,19 @@ python incident_fetcher.py model=anthropic/claude-sonnet-4-5
 You must have the corresponding provider authenticated (`opencode auth login <provider>`) and the
 model available (`opencode models` to list). The model used for each run is recorded in the `llm_meta` column of every output row.
 
+#### LLM integration: opencode + files (for now)
+
+The pipeline invokes the LLM by shelling out to `opencode run`, passing input
+entries and receiving judgments via JSON files as the IPC channel. This was
+chosen deliberately for the POC: opencode handles provider auth and gives
+access to a free-tier model, and having the agent write a file produces a
+clean, validatable artifact. The file I/O overhead is negligible next to LLM
+latency.
+
+If/when the project is funded, the plan is to switch to direct provider API
+calls with structured (JSON-mode) output — fully in-memory, schema-enforced,
+and without the subprocess boundary.
+
 ### Database
 From the obsv/ directory:
 

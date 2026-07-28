@@ -29,7 +29,7 @@ class IncidentReport(models.Model):
     #Trimmed json_blob as produced by the pipeline
     raw_data = models.JSONField()
 
-    #--- Core content (extracted later; optional) ---
+    #--- Core content ---
 
     # Short descriptive title of the incident
     title = models.TextField(blank=True, default="")
@@ -54,10 +54,13 @@ class IncidentReport(models.Model):
     #When LLM passed judgment on incident
     time_judged = models.DateTimeField(null=True)
 
+    #When LLM extracted details of the incident
+    time_hydrated = models.DateTimeField(null=True)
+
     #When human approved or rejected event for display
     time_reviewed = models.DateTimeField(null=True)
 
-    #--- Animal details (extracted later; optional) ---
+    #--- Animal details  ---
 
     AnimalType = models.TextChoices("AnimalType", "farmed wild companion other unknown")
     animal_type = models.CharField(
@@ -94,12 +97,14 @@ class IncidentReport(models.Model):
 
     class StatusType(models.TextChoices):
         new = "new", "New"
+        llm_rel = "llm_relevant", "LLM deemed relevant"
+        llm_rej = "llm_rejected", "LLM rejected for lack of relevancy"
         pending = "pending", "Pending"
         approved = "approved", "Approved"
         rejected = "rejected", "Rejected"
 
     status = models.CharField(
-        max_length=8,
+        max_length=12,
         choices=StatusType.choices,
         default=StatusType.new,
     )
