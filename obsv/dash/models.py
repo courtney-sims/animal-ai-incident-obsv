@@ -131,3 +131,28 @@ class IncidentReport(models.Model):
 
     def __str__(self):
         return self.title
+
+#Metadata about each run of the pipeline
+class PipelineRun(models.Model):
+    started_at = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Status(models.TextChoices):
+        STARTED = "started", "Started"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    status = models.CharField(
+        max_length=12,
+        choices=Status.choices,
+        default=Status.STARTED,
+    )
+
+    def __str__(self):
+        return f"PipelineRun {self.pk} started={self.started_at} status={self.status}"
+
+#Each source used for data collection
+class SourceIngestion(models.Model):
+    source = models.CharField(max_length=32, unique=True)
+    single_ingestion = models.BooleanField(default=False)
+    ingested_at = models.DateTimeField(null=True, blank=True)

@@ -9,6 +9,7 @@ the command writes to its (temp) workdir, so they see the exact pk-derived
 """
 
 import contextlib
+from datetime import timedelta
 import json
 from io import StringIO
 from pathlib import Path
@@ -18,7 +19,7 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 
-from dash.models import IncidentReport
+from dash.models import IncidentReport, PipelineRun
 from pipeline.incident_fetcher import URL
 
 
