@@ -7,6 +7,7 @@ import requests
 
 from pipeline.incident_fetcher import (
     OPENALEX_KEEP_FIELDS,
+    URL,
     _get_dotted,
     _set_dotted,
     assign_entry_ids,
@@ -14,7 +15,9 @@ from pipeline.incident_fetcher import (
     collect_data,
     fetch_csv,
     filter_by_date,
+    map_direct_fields,
     parse_csv,
+    prepare_entry,
     query_openalex,
     reconstruct_abstract,
     trim_nhtsa_fields,
@@ -335,6 +338,152 @@ def test_assign_entry_ids_is_idempotent():
     assign_entry_ids(entries)
     assert entries[0]["entry_id"] == "e9999"  # untouched
     assert entries[1]["entry_id"] == "e0000"  # newly assigned
+
+
+# ---------- prepare_entry ----------
+
+
+def test_prepare_entry_nhtsa():
+    entry = {
+        "entry_id": "e0",
+        "aaiid_data_source": "nhtsa_incident_report",
+        "Report ID": "A1",
+        "Crash With": "Animal",
+        "Narrative": "duck",
+        "VIN": "dropped",
+    }
+    prepared = prepare_entry(entry)
+    assert prepared["aaiid_data_source"] == "nhtsa_incident_report"
+    assert prepared["entry_id"] == "e0"
+    assert prepared["source_id"] == "A1"
+    blob = prepared["json_blob"]
+    assert blob["Report ID"] == "A1"
+    assert "VIN" not in blob  # trimmed to keep-list
+    assert "aaiid_data_source" not in blob  # internal field stripped from blob
+    assert "entry_id" not in blob  # internal field stripped from blob
+
+
+def test_prepare_entry_openalex():
+    entry = {
+        "entry_id": "e1",
+        "aaiid_data_source": "openalex_work",
+        "id": "https://openalex.org/W1",
+        "title": "AV and deer",
+        "abstract": "text",
+        "primary_location": {"landing_page_url": "u1", "pdf_url": "u2", "junk": "x"},
+        "doi": "dropped",
+    }
+    prepared = prepare_entry(entry)
+    assert prepared["aaiid_data_source"] == "openalex_work"
+    assert prepared["entry_id"] == "e1"
+    assert prepared["source_id"] == "https://openalex.org/W1"
+    blob = prepared["json_blob"]
+    assert blob["id"] == "https://openalex.org/W1"
+    assert blob["primary_location"] == {"landing_page_url": "u1", "pdf_url": "u2"}
+    assert "doi" not in blob
+    assert "aaiid_data_source" not in blob
+    assert "entry_id" not in blob
+
+
+def test_prepare_entry_unknown_source_passthrough():
+    entry = {
+        "aaiid_data_source": "some_future_source",
+        "entry_id": "e2",
+        "foo": "bar",
+        "baz": 1,
+    }
+    prepared = prepare_entry(entry)
+    assert prepared["aaiid_data_source"] == "some_future_source"
+    assert prepared["source_id"] == ""  # unknown source has no natural key
+    blob = prepared["json_blob"]
+    # unknown source: passthrough minus internal fields
+    assert blob == {"foo": "bar", "baz": 1}
+
+
+def test_prepare_entry_missing_natural_key_yields_empty_source_id():
+    entry = {"aaiid_data_source": "nhtsa_incident_report", "Narrative": "no report id"}
+    prepared = prepare_entry(entry)
+    assert prepared["source_id"] == ""
+    assert prepared["entry_id"] == ""  # absent entry_id defaults to ""
+
+
+# ---------- map_direct_fields ----------
+
+
+def test_map_direct_fields_nhtsa():
+    entry = {
+        "aaiid_data_source": "nhtsa_incident_report",
+        "City": "Austin",
+        "Reporting Entity": "Waymo LLC",
+        "Incident Date": "MAR-2026",
+        "Report ID": "A1",
+    }
+    fields = map_direct_fields(entry)
+    assert fields["url"] == URL
+    assert fields["city"] == "Austin"
+    assert fields["ai_system_manufacturer"] == "Waymo LLC"
+    assert fields["time_occurred"] == datetime(2026, 3, 1)
+
+
+def test_map_direct_fields_nhtsa_unparseable_date_omits_time_occurred(capsys):
+    entry = {
+        "aaiid_data_source": "nhtsa_incident_report",
+        "Incident Date": "not-a-date",
+    }
+    fields = map_direct_fields(entry)
+    assert "time_occurred" not in fields
+    assert fields["url"] == URL
+    assert "could not parse Incident Date" in capsys.readouterr().out
+
+
+def test_map_direct_fields_nhtsa_omits_empty_optionals():
+    entry = {"aaiid_data_source": "nhtsa_incident_report"}
+    fields = map_direct_fields(entry)
+    # url is always present; city / entity / date are omitted when absent
+    assert fields == {"url": URL}
+
+
+def test_map_direct_fields_openalex_landing_page_preferred():
+    entry = {
+        "aaiid_data_source": "openalex_work",
+        "id": "https://openalex.org/W1",
+        "display_name": "AV and deer",
+        "title": "raw title",
+        "publication_date": "2026-06-01",
+        "primary_location": {"landing_page_url": "https://land", "pdf_url": "https://pdf"},
+    }
+    fields = map_direct_fields(entry)
+    assert fields["url"] == "https://land"
+    assert fields["title"] == "AV and deer"  # display_name preferred over title
+    assert fields["time_reported"] == "2026-06-01"
+
+
+def test_map_direct_fields_openalex_pdf_fallback():
+    entry = {
+        "aaiid_data_source": "openalex_work",
+        "id": "https://openalex.org/W1",
+        "title": "only title",
+        "primary_location": {"pdf_url": "https://pdf"},
+    }
+    fields = map_direct_fields(entry)
+    assert fields["url"] == "https://pdf"
+    assert fields["title"] == "only title"  # falls back to title when no display_name
+
+
+def test_map_direct_fields_openalex_id_fallback_and_missing_primary_location():
+    entry = {
+        "aaiid_data_source": "openalex_work",
+        "id": "https://openalex.org/W1",
+    }
+    fields = map_direct_fields(entry)
+    assert fields["url"] == "https://openalex.org/W1"  # id is itself a URL
+    assert "title" not in fields
+    assert "time_reported" not in fields
+
+
+def test_map_direct_fields_unknown_source_returns_empty():
+    assert map_direct_fields({"aaiid_data_source": "mystery"}) == {}
+    assert map_direct_fields({}) == {}
 
 
 # ---------- build_records ----------

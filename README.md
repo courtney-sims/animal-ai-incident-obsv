@@ -12,17 +12,12 @@ Data sources currently included:
 
 The pipeline runs in three steps:
 
-1. **Collect.** Python fetches from NHTSA and OpenAlex, tags each entry with its source, and assigns a synthetic `entry_id`.
-2. **Classify.** An LLM agent (via `opencode run`) reads the combined JSON and writes a JSON array of judgments — one per input entry — with fields `entry_id`, `keep`, `reasoning`, `confidence`. The LLM only classifies; it does not write the final CSV.
-3. **Assemble.** Python joins entries with judgments, trims fields per source, and writes `animal_incidents_<TIMESTAMP>.csv` with columns:
-   - `aaiid_data_source` — `nhtsa_incident_report` or `openalex_work`
-   - `entry_id` — synthetic ID linking back to the input
-   - `json_blob` — trimmed JSON of the entry
-   - `reasoning` — why the entry was included
-   - `confidence` — `High` / `Medium` / `Low`
-   - `llm_meta` — provenance JSON, currently `{"model": "..."}`
+1. **Collect.** Python fetches from data sources and adds each entry as "new" to the db.
+2. **Classify.** An LLM agent (via `opencode run`) looks at all "new" entries and determines whether or not they are relevant.
+3. **Hydrate.** An LLM agent (via `opencode run`) looks at all "llm_relevant" entries and fills out additional data fields based on the incident as described from the source and marks hydrated entries as "pending".
 
-Judgments that fail validation (bad shape, unknown `entry_id`, duplicates, missing fields) are logged to stdout and skipped. The pipeline does not abort on validation problems, but affected entries simply won't appear in the CSV.
+Human intervention is needed at the final step:
+4. **Review.** Humans can mark "pending" entries as either "approved" or "rejected".
 
 ## Setup
 
@@ -74,6 +69,13 @@ python manage.py shell
 ```
 
 ### Data Pipeline
+```bash
+   python obsv/manage.py run_pipeline [--model provider/model] [--workdir PATH]
+```
+
+This django command fetches data from all sources and populates the database with LLM judgments. `--workdir` preserves intermediate JSON files for debugging.
+
+For django-free, database-free debugging, run:
 
 ```bash
 python pipeline/main.py
@@ -86,11 +88,11 @@ uses `opencode/deepseek-v4-flash-free` — a free-tier model bundled with
 opencode. Override on the command line with a `model=<provider/model>` arg:
 
 ```bash
-python incident_fetcher.py model=anthropic/claude-sonnet-4-5
+python -m pipeline/main.py model=anthropic/claude-sonnet-4-5
 ```
 
 You must have the corresponding provider authenticated (`opencode auth login <provider>`) and the
-model available (`opencode models` to list). The model used for each run is recorded in the `llm_meta` column of every output row.
+model available (`opencode models` to list).
 
 #### LLM integration: opencode + files (for now)
 
@@ -134,7 +136,7 @@ python manage.py migrate
 Evaluate how well the prompt performs against a small labeled test set:
 
 ```python
-from prompt_eval import run_eval
+from pipeline.prompt_eval import run_eval
 
 metrics = run_eval()
 print(metrics)  # {"precision": 1.0, "recall": 0.67, "f1": 0.8, ...}
