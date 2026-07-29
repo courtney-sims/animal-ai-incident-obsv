@@ -35,7 +35,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from dash.models import IncidentReport
+from dash.models import IncidentReport, PipelineRun, SourceIngestion
 from pipeline import incident_classifier, incident_fetcher
 from pipeline.main import get_data_paths
 
@@ -78,8 +78,16 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         now = timezone.now()
 
-        # --- Phase 4a/3a: ingest ---
-        created_count, refreshed_count = self._ingest(now)
+        #The - prefixing started_at means descending order.
+        #Then .first() gives first item, meaning most recently completed.
+        last_run = (PipelineRun.objects.filter(status=PipelineRun.Status.COMPLETED)
+                    .order_by("-started_at")
+                    .first())
+        last_run_at = last_run.started_at if last_run else None
+
+        run = PipelineRun.objects.create(started_at=now)
+
+        created_count, refreshed_count = self._ingest(now, last_run_at)
 
         model: str | None = None
         judged_relevant = judged_llm_rejected = still_unjudged = 0
@@ -92,46 +100,56 @@ class Command(BaseCommand):
         else:
             workdir_ctx = tempfile.TemporaryDirectory()
 
-        with workdir_ctx as wd:
-            workdir = Path(wd)
+        try:
+            with workdir_ctx as wd:
+                workdir = Path(wd)
 
-            # --- Phase 3b/3c/3d: classify unjudged rows ---
-            # Filter by status, not by this run's entries, so rows left `new`
-            # by a previous crashed/partial run get picked up automatically.
-            unjudged = list(
-                IncidentReport.objects.filter(status=IncidentReport.StatusType.new)
-            )
-            if not unjudged:
-                self.stdout.write("No unjudged records; skipping classification.")
-            else:
-                model, judged_relevant, judged_llm_rejected, still_unjudged = (
-                    self._classify(unjudged, workdir, options["model"], now)
+                # --- classify unjudged rows ---
+                # Filter by status, not by this run's entries, so rows left `new`
+                # by a previous crashed/partial run get picked up automatically.
+                unjudged = list(
+                    IncidentReport.objects.filter(status=IncidentReport.StatusType.new)
                 )
+                if not unjudged:
+                    self.stdout.write("No unjudged records; skipping classification.")
+                else:
+                    model, judged_relevant, judged_llm_rejected, still_unjudged = (
+                        self._classify(unjudged, workdir, options["model"], now)
+                    )
 
-            # --- Phase 4b: extract details from relevant rows ---
-            relevant = list(
-                IncidentReport.objects.filter(
-                    status=IncidentReport.StatusType.llm_rel
+                # --- Phase 4b: extract details from relevant rows ---
+                relevant = list(
+                    IncidentReport.objects.filter(
+                        status=IncidentReport.StatusType.llm_rel
+                    )
                 )
-            )
-            if not relevant:
-                self.stdout.write("No relevant records to extract; skipping extraction.")
-            else:
-                # Failure isolation: an extraction crash must not abort the
-                # already-committed judgment updates. Leave rows llm_relevant
-                # (retried next run) and continue to the summary.
-                try:
-                    emodel, extracted, still_unextracted = self._extract(
-                        relevant, workdir, options["model"], now
-                    )
-                    model = model or emodel
-                except Exception as exc:
-                    print(
-                        f"run_pipeline: extraction phase failed ({exc!r}); "
-                        f"leaving {len(relevant)} row(s) llm_relevant for retry",
-                        file=sys.stderr,
-                    )
-                    still_unextracted = len(relevant)
+                if not relevant:
+                    self.stdout.write("No relevant records to extract; skipping extraction.")
+                else:
+                    # Failure isolation: an extraction crash must not abort the
+                    # already-committed judgment updates. Leave rows llm_relevant
+                    # (retried next run) and continue to the summary.
+                    try:
+                        emodel, extracted, still_unextracted = self._extract(
+                            relevant, workdir, options["model"], now
+                        )
+                        model = model or emodel
+                    except Exception as exc:
+                        print(
+                            f"run_pipeline: extraction phase failed ({exc!r}); "
+                            f"leaving {len(relevant)} row(s) llm_relevant for retry",
+                            file=sys.stderr,
+                        )
+                        still_unextracted = len(relevant)
+            run.status = PipelineRun.Status.COMPLETED
+
+        except Exception:
+            run.status = PipelineRun.Status.FAILED
+            raise
+
+        finally:
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "completed_at"])
 
         # --- Phase 3e/4b.3: summary ---
         self._write_summary(
@@ -147,15 +165,31 @@ class Command(BaseCommand):
 
     # ------------------------------------------------------------------ #
 
-    def _ingest(self, now):
+    def _ingest(self, now, since=None):
         """Phase 4a/3a: upsert every collected entry; return (created, refreshed)."""
         created_count = 0
         refreshed_count = 0
 
-        entries = incident_fetcher.collect_data()
+        already_ingested = set(
+            SourceIngestion.objects
+            .filter(single_ingestion=True, ingested_at__isnull=False)
+            .values_list("source", flat=True)
+        )
+
+        entries = incident_fetcher.collect_data(
+            now = now,
+            since = since,
+            already_ingested=already_ingested
+        )
+
+        sources_seen: set[str] = set()
 
         with transaction.atomic():
             for entry in entries:
+                source = entry.get("aaiid_data_source")
+                if source:
+                    sources_seen.add(source)
+
                 prepared = incident_fetcher.prepare_entry(entry)
                 if not prepared["source_id"]:
                     print(
@@ -186,6 +220,12 @@ class Command(BaseCommand):
                     created_count += 1
                 else:
                     refreshed_count += 1
+
+        for source in sources_seen:
+            SourceIngestion.objects.update_or_create(
+                source=source,
+                defaults={"ingested_at": now}
+            )
 
         return created_count, refreshed_count
 
