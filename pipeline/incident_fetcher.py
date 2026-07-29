@@ -287,6 +287,65 @@ def _source_id(entry: dict) -> str:
     return ""
 
 
+def map_direct_fields(entry: dict) -> dict:
+    """Return model-column values derivable directly from source data.
+
+    Sparse by design: each source returns only the fields it can provide.
+    Only keys with non-empty, successfully-parsed values are included; unknown
+    sources return ``{}``.
+    """
+    source = entry.get("aaiid_data_source")
+    fields: dict = {}
+
+    if source == "nhtsa_incident_report":
+        # No per-report public URL exists; the bulk SGO CSV is the source.
+        fields["url"] = URL
+        city = entry.get("City", "")
+        if city:
+            fields["city"] = city
+        entity = entry.get("Reporting Entity", "")
+        if entity:
+            fields["ai_system_manufacturer"] = entity
+        raw_date = entry.get("Incident Date", "")
+        if raw_date:
+            try:
+                fields["time_occurred"] = datetime.strptime(raw_date, "%b-%Y")
+            except ValueError:
+                print(
+                    f"map_direct_fields: could not parse Incident Date "
+                    f"{raw_date!r} as '%b-%Y'; omitting time_occurred"
+                )
+    elif source == "openalex_work":
+        url = (
+            _get_dotted(entry, "primary_location.landing_page_url")
+            or _get_dotted(entry, "primary_location.pdf_url")
+            or entry.get("id")
+        )
+        if url:
+            fields["url"] = url
+        title = entry.get("display_name") or entry.get("title")
+        if title:
+            fields["title"] = title
+        pub_date = entry.get("publication_date", "")
+        if pub_date:
+            fields["time_reported"] = pub_date
+
+    return fields
+
+
+def prepare_entry(entry: dict) -> dict:
+    """Return the DB-ready projection of a raw entry.
+
+    Keys: aaiid_data_source, entry_id (may be absent), source_id, json_blob.
+    """
+    return {
+        "aaiid_data_source": entry.get("aaiid_data_source", ""),
+        "entry_id": entry.get("entry_id", ""),
+        "source_id": _source_id(entry),
+        "json_blob": _trim_entry(entry),
+    }
+
+
 def build_records(
     entries: list[dict],
     judgments: list[Judgment],
@@ -324,10 +383,7 @@ def build_records(
         if not j.get("keep"):
             continue
         records.append({
-            "aaiid_data_source": entry.get("aaiid_data_source", ""),
-            "entry_id": entry_id,
-            "source_id": _source_id(entry),
-            "json_blob": _trim_entry(entry),
+            **prepare_entry(entry),
             "reasoning": j.get("reasoning", ""),
             "confidence": j.get("confidence", ""),
             "model": model,

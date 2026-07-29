@@ -6,9 +6,29 @@ from unittest.mock import MagicMock, patch
 from pipeline.incident_classifier import (
     LLM_MODEL_DEFAULT,
     classify,
+    extract_details,
+    generate_extraction_prompt,
     generate_prompt,
+    parse_details,
     parse_judgments,
 )
+
+
+def _valid_detail(entry_id="e0", **overrides):
+    detail = {
+        "entry_id": entry_id,
+        "title": "AV strikes deer",
+        "description": "An autonomous vehicle struck a deer.",
+        "animal_type": "wild",
+        "animal_species": "deer",
+        "animal_count": 1,
+        "harm_type": "collision",
+        "harm_description": "fatal impact",
+        "ai_system": "Waymo Driver",
+        "country": "USA",
+    }
+    detail.update(overrides)
+    return detail
 
 
 def _write_judgments(path: Path, judgments) -> None:
@@ -181,3 +201,158 @@ def test_parse_judgments_dedupe_prints_both_records(tmp_path, capsys):
     assert "second" in out
     assert "kept:" in out
     assert "discarded:" in out
+
+
+# ---------- generate_extraction_prompt ----------
+
+
+def test_generate_extraction_prompt_mentions_filenames_and_fields():
+    prompt = generate_extraction_prompt("in.json", "out.json")
+    assert "in.json" in prompt
+    assert "out.json" in prompt
+    assert "entry_id" in prompt
+    assert "animal_type" in prompt
+    assert "animal_count" in prompt
+
+
+# ---------- extract_details (LLM invocation + return shape) ----------
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_extract_details_returns_model_and_details(mock_run, tmp_path):
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.json"
+    input_path.write_text("[]")
+
+    def fake_run(*args, **kwargs):
+        output_path.write_text(json.dumps([_valid_detail("e0000")]))
+        return MagicMock(returncode=0)
+
+    mock_run.side_effect = fake_run
+
+    model, details = extract_details(tmp_path, input_path, output_path, model="m/x")
+    assert model == "m/x"
+    assert details == [_valid_detail("e0000")]
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_extract_details_uses_default_model_when_none(mock_run, tmp_path):
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.json"
+    input_path.write_text("[]")
+    mock_run.side_effect = lambda *a, **k: output_path.write_text("[]")
+
+    model, _ = extract_details(tmp_path, input_path, output_path)
+    assert model == LLM_MODEL_DEFAULT
+    args = mock_run.call_args[0][0]
+    assert args[args.index("-m") + 1] == LLM_MODEL_DEFAULT
+
+
+# ---------- parse_details: file / JSON / top-level shape ----------
+
+
+def test_parse_details_returns_empty_when_file_missing(tmp_path, capsys):
+    result = parse_details(tmp_path / "does_not_exist.json")
+    assert result == []
+    assert "details file missing" in capsys.readouterr().out
+
+
+def test_parse_details_returns_empty_on_invalid_json(tmp_path, capsys):
+    path = tmp_path / "bad.json"
+    path.write_text("not json{")
+    result = parse_details(path)
+    assert result == []
+    assert "not valid JSON" in capsys.readouterr().out
+
+
+def test_parse_details_returns_empty_when_top_level_not_list(tmp_path, capsys):
+    path = tmp_path / "obj.json"
+    path.write_text('{"details": []}')
+    result = parse_details(path)
+    assert result == []
+    assert "top-level is dict" in capsys.readouterr().out
+
+
+# ---------- parse_details: per-record shape ----------
+
+
+def test_parse_details_appends_valid_record(tmp_path):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([_valid_detail("e0")]))
+    result = parse_details(path)
+    assert result == [_valid_detail("e0")]
+
+
+def test_parse_details_skips_non_dict_element(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps(["nope", _valid_detail("e0")]))
+    result = parse_details(path)
+    assert [d["entry_id"] for d in result] == ["e0"]
+    assert "expected dict" in capsys.readouterr().out
+
+
+def test_parse_details_skips_bad_animal_type_enum(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([
+        _valid_detail("e0", animal_type="dinosaur"),
+        _valid_detail("e1"),
+    ]))
+    result = parse_details(path)
+    assert [d["entry_id"] for d in result] == ["e1"]
+    assert "animal_type must be one of" in capsys.readouterr().out
+
+
+def test_parse_details_skips_non_int_animal_count(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([
+        _valid_detail("e0", animal_count="three"),
+        _valid_detail("e1"),
+    ]))
+    result = parse_details(path)
+    assert [d["entry_id"] for d in result] == ["e1"]
+    assert "animal_count must be int" in capsys.readouterr().out
+
+
+def test_parse_details_rejects_bool_animal_count(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([_valid_detail("e0", animal_count=True)]))
+    result = parse_details(path)
+    assert result == []
+    assert "animal_count must be int" in capsys.readouterr().out
+
+
+def test_parse_details_skips_missing_entry_id(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    bad = _valid_detail()
+    del bad["entry_id"]
+    path.write_text(json.dumps([bad, _valid_detail("e1")]))
+    result = parse_details(path)
+    assert [d["entry_id"] for d in result] == ["e1"]
+    assert "entry_id must be str" in capsys.readouterr().out
+
+
+def test_parse_details_skips_non_str_field(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([
+        _valid_detail("e0", title=123),
+        _valid_detail("e1"),
+    ]))
+    result = parse_details(path)
+    assert [d["entry_id"] for d in result] == ["e1"]
+    assert "title must be str" in capsys.readouterr().out
+
+
+# ---------- parse_details: dedupe (first wins) ----------
+
+
+def test_parse_details_dedupes_repeated_entry_ids_first_wins(tmp_path, capsys):
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps([
+        _valid_detail("e0", title="first"),
+        _valid_detail("e0", title="second"),
+    ]))
+    result = parse_details(path)
+    assert len(result) == 1
+    assert result[0]["title"] == "first"
+    out = capsys.readouterr().out
+    assert "duplicate entry_id" in out
