@@ -6,6 +6,18 @@ from typing import Tuple
 
 from pipeline.classifier_types import Judgment, VALID_CONFIDENCES
 
+
+class ClassificationOutputError(Exception):
+    """The classify phase's judgments file is missing or structurally invalid.
+
+    Raised for hard failures where the LLM produced no usable output file at
+    all: the file is absent, is not valid JSON, or its top-level is not a JSON
+    list. A structurally-valid but empty list (genuine "zero judgments") and
+    per-record validation problems (handled tolerantly by
+    :func:`parse_judgments`) are NOT failures and do not raise.
+    """
+
+
 # Default LLM used for relevance classification.
 LLM_MODEL_DEFAULT = "opencode/deepseek-v4-flash-free"
 
@@ -13,10 +25,10 @@ LLM_MODEL_DEFAULT = "opencode/deepseek-v4-flash-free"
 # AnimalType choices).
 VALID_ANIMAL_TYPES = ("farmed", "wild", "companion", "other", "unknown")
 
-def generate_prompt(incidents_filename: str, judgments_filename: str) -> str:
+def generate_prompt(incidents_path: str, judgments_path: str) -> str:
     return f"""\
 You are a classifier for the Animal AI Incident Observatory. You will receive
-a JSON array of entries in the file {incidents_filename}. Each entry has an
+a JSON array of entries in the file {incidents_path}. Each entry has an
 "entry_id" field.
 
 For every entry, decide whether it describes an AI system directly harming a
@@ -35,8 +47,8 @@ Rules for aaiid_data_source == "openalex_work":
 - Drop general animal health, animal law, animal testing, or agriculture
   unless AI is central.
 
-Output: write a JSON array to {judgments_filename} in the current working
-directory. Include exactly one object per input entry. Each object must have:
+Output: write a JSON array to the file at {judgments_path}. Use exactly that
+path. Include exactly one object per input entry. Each object must have:
 - entry_id: string, matching the input exactly
 - keep: boolean (true or false, JSON literal — not a string)
 - reasoning: short string explaining the decision
@@ -137,18 +149,18 @@ def parse_judgments(judgments_path) -> list[Judgment]:
 
     return validated
 
-def generate_extraction_prompt(input_filename: str, output_filename: str) -> str:
+def generate_extraction_prompt(input_path: str, output_path: str) -> str:
     return f"""\
 You are a detail extractor for the Animal AI Incident Observatory. You will
-receive a JSON array of entries in the file {input_filename}. Each entry has an
+receive a JSON array of entries in the file {input_path}. Each entry has an
 "entry_id" field and describes an AI system harming (or a paper about AI
 harming) a non-human animal.
 
 For every entry, extract the following fields from the entry's content. When a
 value cannot be determined from the entry, use the unknown-marker shown.
 
-Output: write a JSON array to {output_filename} in the current working
-directory. Include exactly one object per input entry. Each object must have:
+Output: write a JSON array to the file at {output_path}. Use exactly that
+path. Include exactly one object per input entry. Each object must have:
 - entry_id: string, matching the input exactly
 - title: short descriptive title of the incident (string; "" if unknown)
 - description: one or two sentence summary of the incident (string; "" if unknown)
@@ -287,7 +299,7 @@ def extract_details(
     """
     resolved_model = model or LLM_MODEL_DEFAULT
 
-    prompt = generate_extraction_prompt(input_path.name, output_path.name)
+    prompt = generate_extraction_prompt(str(input_path), str(output_path))
     subprocess.run(
         [
             "opencode", "run", prompt,
@@ -319,7 +331,7 @@ def classify(
     """
     resolved_model = model or LLM_MODEL_DEFAULT
 
-    prompt = generate_prompt(incidents_path.name, judgments_path.name)
+    prompt = generate_prompt(str(incidents_path), str(judgments_path))
     subprocess.run(
         [
             "opencode", "run", prompt,
@@ -330,7 +342,31 @@ def classify(
         check=True,
     )
 
+    # Hard failures for the classify phase: the LLM produced no usable output
+    # file at all. These raise so the caller can mark the run failed instead of
+    # silently classifying nothing. A structurally-valid but empty list (genuine
+    # "zero judgments") and per-record validation problems are tolerated by
+    # parse_judgments below and do NOT raise.
+    if not judgments_path.exists():
+        raise ClassificationOutputError(
+            f"classify: judgments file was not produced at {judgments_path}; "
+            "the LLM subprocess returned no output there"
+        )
+
+    try:
+        raw = json.loads(judgments_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ClassificationOutputError(
+            f"classify: judgments file at {judgments_path} is not valid JSON: {e}"
+        ) from e
+
+    if not isinstance(raw, list):
+        raise ClassificationOutputError(
+            f"classify: judgments file at {judgments_path} top-level is "
+            f"{type(raw).__name__}, expected a JSON list"
+        )
+
     judgments = parse_judgments(judgments_path)
-    
+
     return resolved_model, judgments
 

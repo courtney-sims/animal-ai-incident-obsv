@@ -31,6 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
@@ -95,10 +96,16 @@ class Command(BaseCommand):
 
         # A single workdir spans both LLM phases so --workdir debug files land
         # in one place. A tempdir auto-deletes; an explicit --workdir is left.
+        #
+        # The tempdir is created *inside* the project tree (not the system
+        # default /tmp) because the opencode subprocess confines its file
+        # writes to its detected project/worktree. A /tmp workdir sits outside
+        # that scope, so the LLM's judgments file landed in the project root
+        # instead of the workdir and the reader never found it.
         if options["workdir"]:
             workdir_ctx = contextlib.nullcontext(options["workdir"])
         else:
-            workdir_ctx = tempfile.TemporaryDirectory()
+            workdir_ctx = tempfile.TemporaryDirectory(dir=settings.BASE_DIR.parent)
 
         try:
             with workdir_ctx as wd:
@@ -261,9 +268,15 @@ class Command(BaseCommand):
             model, judgments = incident_classifier.classify(
                 workdir, incidents_path, judgments_path, model_opt
             )
-        except subprocess.CalledProcessError as exc:
+        except (
+            subprocess.CalledProcessError,
+            incident_classifier.ClassificationOutputError,
+        ) as exc:
             # Ingested rows are already committed as `new`, so the next run
-            # resumes exactly where this one failed.
+            # resumes exactly where this one failed. A missing or structurally
+            # invalid judgments file (ClassificationOutputError) is a hard
+            # failure, not a silent no-op: it propagates so the run is logged
+            # `failed` rather than `completed`.
             raise CommandError(f"Pipeline classification failed: {exc}") from exc
 
         judged_relevant = 0

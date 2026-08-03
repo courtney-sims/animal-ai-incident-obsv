@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +14,6 @@ from pipeline.incident_fetcher import (
     build_records,
     collect_data,
     fetch_csv,
-    filter_by_date,
     map_direct_fields,
     parse_csv,
     prepare_entry,
@@ -175,56 +174,6 @@ def test_fetch_csv_raises_on_http_error(mock_get):
         fetch_csv("http://example.com/bad.csv")
 
 
-# ---------- filter_by_date ----------
-
-
-def test_filter_by_date_keeps_current_month_only():
-    data = [
-        {"Incident Date": "JUN-2026", "id": "1"},
-        {"Incident Date": "MAY-2026", "id": "2"},
-        {"Incident Date": "APR-2026", "id": "3"},
-    ]
-    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
-    assert len(result) == 1
-    assert result[0]["id"] == "1"
-
-
-def test_filter_by_date_drops_missing_date():
-    data = [
-        {"Incident Date": "JUN-2026", "id": "1"},
-        {"id": "2"},
-    ]
-    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
-    assert [r["id"] for r in result] == ["1"]
-
-
-def test_filter_by_date_drops_blank_date():
-    data = [{"Incident Date": "   ", "id": "1"}, {"Incident Date": "", "id": "2"}]
-    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
-    assert result == []
-
-
-def test_filter_by_date_drops_malformed_date_without_error():
-    data = [
-        {"Incident Date": "not-a-date", "id": "1"},
-        {"Incident Date": "2026-06", "id": "2"},
-        {"Incident Date": "JUN-2026", "id": "3"},
-    ]
-    result = filter_by_date(data, months_back=1, now=datetime(2026, 6, 25))
-    assert [r["id"] for r in result] == ["3"]
-
-
-def test_filter_by_date_months_back_wider_window():
-    data = [
-        {"Incident Date": "JUN-2026", "id": "jun"},
-        {"Incident Date": "MAY-2026", "id": "may"},
-        {"Incident Date": "APR-2026", "id": "apr"},
-        {"Incident Date": "MAR-2026", "id": "mar"},
-    ]
-    result = filter_by_date(data, months_back=3, now=datetime(2026, 6, 25))
-    assert [r["id"] for r in result] == ["jun", "may", "apr"]
-
-
 # ---------- reconstruct_abstract ----------
 
 
@@ -244,16 +193,179 @@ def test_reconstruct_abstract_empty_dict_returns_none():
 # ---------- collect_data ----------
 
 
+def _ok_response(payload):
+    """A MagicMock standing in for a successful ``requests`` response."""
+    resp = MagicMock()
+    resp.ok = True
+    resp.json.return_value = payload
+    return resp
+
+
 @patch("pipeline.incident_fetcher.requests.get")
 def test_query_openalex_returns_papers(mock_get):
     mock_response = mock_get.return_value
+    mock_response.ok = True
     mock_response.json.return_value = {
-        "meta": {"count": 1, "page": 1, "per_page": 25},
+        "meta": {"count": 1, "page": 1, "per_page": 25, "next_cursor": None},
         "results": [{"id": "https://openalex.org/W123", "title": "Animal cognition"}],
     }
     result = query_openalex({"per_page": 25})
     assert len(result) == 1
     assert result[0]["id"] == "https://openalex.org/W123"
+
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_follows_cursor_pagination(mock_get):
+    mock_get.side_effect = [
+        _ok_response({
+            "meta": {"next_cursor": "PAGE2"},
+            "results": [{"id": "W1"}, {"id": "W2"}],
+        }),
+        _ok_response({
+            "meta": {"next_cursor": "PAGE3"},
+            "results": [{"id": "W3"}],
+        }),
+        _ok_response({
+            "meta": {"next_cursor": None},
+            "results": [{"id": "W4"}],
+        }),
+    ]
+
+    result = query_openalex({"search": "animal"})
+
+    assert [r["id"] for r in result] == ["W1", "W2", "W3", "W4"]
+    assert mock_get.call_count == 3
+    # First page starts at the wildcard cursor; later pages follow next_cursor.
+    cursors = [c.kwargs["params"]["cursor"] for c in mock_get.call_args_list]
+    assert cursors == ["*", "PAGE2", "PAGE3"]
+
+
+@patch("pipeline.incident_fetcher.OPENALEX_MAX_PAGES", 2)
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_respects_page_cap(mock_get):
+    # Every page advertises another cursor, so only the cap stops the loop.
+    mock_get.side_effect = [
+        _ok_response({"meta": {"next_cursor": "NEXT"}, "results": [{"id": "W1"}]}),
+        _ok_response({"meta": {"next_cursor": "NEXT"}, "results": [{"id": "W2"}]}),
+        _ok_response({"meta": {"next_cursor": "NEXT"}, "results": [{"id": "W3"}]}),
+    ]
+
+    result = query_openalex({"search": "animal"})
+
+    assert mock_get.call_count == 2
+    assert [r["id"] for r in result] == ["W1", "W2"]
+
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_raises_with_body_on_error(mock_get):
+    error_resp = MagicMock()
+    error_resp.ok = False
+    error_resp.status_code = 429
+    error_resp.reason = "Too Many Requests"
+    error_resp.url = "https://api.openalex.org/works"
+    error_resp.text = '{"error":"Plan upgrade required"}'
+    mock_get.return_value = error_resp
+
+    with pytest.raises(requests.exceptions.HTTPError) as excinfo:
+        query_openalex({"search": "animal"})
+
+    msg = str(excinfo.value)
+    assert "429" in msg
+    assert "Plan upgrade required" in msg
+
+
+@patch("pipeline.incident_fetcher.OPENALEX_API_KEY", "secret-key-123")
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_sends_api_key_when_set(mock_get):
+    mock_get.return_value = _ok_response({"meta": {"next_cursor": None}, "results": []})
+
+    query_openalex({"search": "animal"})
+
+    sent = mock_get.call_args.kwargs["params"]
+    assert sent["api_key"] == "secret-key-123"
+    assert sent["per_page"] == 100  # OpenAlex documented maximum
+
+
+@patch("pipeline.incident_fetcher.OPENALEX_API_KEY", None)
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_omits_api_key_when_unset(mock_get):
+    mock_get.return_value = _ok_response({"meta": {"next_cursor": None}, "results": []})
+
+    query_openalex({"search": "animal"})
+
+    assert "api_key" not in mock_get.call_args.kwargs["params"]
+
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_query_openalex_redacts_secrets_in_error(mock_get):
+    error_resp = MagicMock()
+    error_resp.ok = False
+    error_resp.status_code = 429
+    error_resp.reason = "Too Many Requests"
+    error_resp.url = (
+        "https://api.openalex.org/works?search=animal"
+        "&api_key=secret-key-123&mailto=me@example.com"
+    )
+    error_resp.text = '{"error":"Insufficient budget"}'
+    mock_get.return_value = error_resp
+
+    with pytest.raises(requests.exceptions.HTTPError) as excinfo:
+        query_openalex({"search": "animal"})
+
+    msg = str(excinfo.value)
+    # Secrets must never leak into logs/tracebacks via the error URL.
+    assert "secret-key-123" not in msg
+    assert "me@example.com" not in msg
+    assert "REDACTED" in msg
+    # Non-sensitive context is preserved.
+    assert "search=animal" in msg
+    assert "Insufficient budget" in msg
+
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_collect_data_skips_openalex_on_http_error(mock_get):
+    """A spent budget / OpenAlex outage must not abort the whole ingest."""
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\nJUN-2026\n"
+
+    error_resp = MagicMock()
+    error_resp.ok = False
+    error_resp.status_code = 429
+    error_resp.reason = "Too Many Requests"
+    error_resp.url = "https://api.openalex.org/works"
+    error_resp.text = '{"error":"Insufficient budget"}'
+
+    mock_get.side_effect = [csv_response, error_resp]
+
+    result = collect_data(now=datetime(2026, 7, 1))
+
+    # NHTSA rows still returned; OpenAlex contributed nothing (skipped).
+    assert any(r.get("aaiid_data_source") == "nhtsa_incident_report" for r in result)
+    assert not any(r.get("aaiid_data_source") == "openalex_work" for r in result)
+
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_collect_data_uses_publication_date_window(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\n"
+    oa_response = _ok_response({"meta": {"next_cursor": None}, "results": []})
+    mock_get.side_effect = [csv_response, oa_response]
+
+    collect_data(now=datetime(2026, 6, 25))
+
+    oa_call = mock_get.call_args_list[-1]
+    params = oa_call.kwargs["params"]
+    filter_param = params["filter"]
+
+    # 90-day rolling window back from `now`, on publication date (free tier).
+    assert "from_publication_date:2026-03-27" in filter_param
+    # Scoped query: an animal term AND a tech term, expressed with pipe-OR /
+    # repeated-filter-AND (no inline boolean operators). `search` is gone.
+    assert "search" not in params
+    assert "title_and_abstract.search:animal|animals|wildlife" in filter_param
+    assert "title_and_abstract.search:autonomous vehicle|self-driving" in filter_param
+    # Two AND clauses -> the search filter key appears twice.
+    assert filter_param.count("title_and_abstract.search:") == 2
 
 
 # TODO: re-enable once date filtering of the NHTSA CSV is settled. This test
@@ -323,6 +435,43 @@ def test_collect_data_handles_missing_openalex_abstract(mock_get):
     papers = [r for r in result if r.get("aaiid_data_source") == "openalex_work"]
     assert papers[0]["abstract"] is None
 
+@patch("pipeline.incident_fetcher.requests.get")
+def test_collect_data_skips_one_shot_source_when_already_ingested(mock_get):
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 0},
+        "results": [],
+    }
+    mock_get.return_value = oa_response
+
+    result = collect_data(
+        now=datetime(2026, 7, 1),
+        already_ingested={"nhtsa_incident_report"}
+    )
+
+    assert mock_get.call_count == 1
+    assert all(
+        r.get("aaiid_data_source") == "openalex_work"
+        for r in result
+    )
+
+@patch("pipeline.incident_fetcher.requests.get")
+def test_collect_data_first_run_fetches_one_shot_source(mock_get):
+    csv_response = MagicMock()
+    csv_response.text = "Incident Date\nJUN-2026\n"
+    oa_response = MagicMock()
+    oa_response.json.return_value = {
+        "meta": {"count": 0},
+        "results": [],
+    }
+    mock_get.side_effect = [csv_response, oa_response]
+
+    result = collect_data(now=datetime(2026, 7, 1))
+    assert mock_get.call_count == 2
+    assert any(
+        r.get("aaiid_data_source") == "nhtsa_incident_report"
+        for r in result
+    )
 
 # ---------- assign_entry_ids ----------
 
@@ -422,7 +571,7 @@ def test_map_direct_fields_nhtsa():
     assert fields["url"] == URL
     assert fields["city"] == "Austin"
     assert fields["ai_system_manufacturer"] == "Waymo LLC"
-    assert fields["time_occurred"] == datetime(2026, 3, 1)
+    assert fields["time_occurred"] == datetime(2026, 3, 1, tzinfo=timezone.utc)
 
 
 def test_map_direct_fields_nhtsa_unparseable_date_omits_time_occurred(capsys):
@@ -455,7 +604,7 @@ def test_map_direct_fields_openalex_landing_page_preferred():
     fields = map_direct_fields(entry)
     assert fields["url"] == "https://land"
     assert fields["title"] == "AV and deer"  # display_name preferred over title
-    assert fields["time_reported"] == "2026-06-01"
+    assert fields["time_reported"] == datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 def test_map_direct_fields_openalex_pdf_fallback():

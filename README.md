@@ -29,6 +29,23 @@ pip install -r requirements.txt
 
 Requires [opencode](https://opencode.ai) available on `PATH`.
 
+### Environment variables
+
+The project uses a `.env` file loaded by `django-environ` on startup.
+
+- **`DATABASE_URL`** (required) — PostgreSQL connection string, e.g.  
+  `postgresql://admin:test@localhost:5432/animal_ai_obsv`
+- **`OPENALEX_API_KEY`** (required for OpenAlex ingestion) — free key from
+  [openalex.org/settings/api](https://openalex.org/settings/api). OpenAlex
+  meters the API by a daily USD budget: **$1/day with a key vs only $0.01/day
+  without**. The pipeline's search queries cost ~$0.001 each, so an
+  unauthenticated run (~10 requests/day allowance) can't complete a single pass.
+  Add it to `.env`:
+  `OPENALEX_API_KEY=your-key`
+- **`OPENALEX_MAILTO`** (optional) — your email address, sent as the `mailto`
+  param so OpenAlex can contact you about your usage. Add it to `.env`:
+  `OPENALEX_MAILTO=you@example.com`
+
 ### Local database setup
 
 #### Installation
@@ -108,10 +125,33 @@ calls with structured (JSON-mode) output — fully in-memory, schema-enforced,
 and without the subprocess boundary.
 
 ### Database
+
+#### Connecting locally
 From the obsv/ directory:
 
 ```bash
 sudo -u postgres psql
+```
+#### Django shell (ORM queries)
+
+```bash
+python obsv/manage.py shell
+```
+
+```python
+from dash.models import IncidentReport, PipelineRun, SourceIngestion
+
+# List
+IncidentReport.objects.all()
+
+# Filter
+IncidentReport.objects.filter(source='nhtsa_incident_report')
+
+# Create
+PipelineRun.objects.create(started_at=timezone.now(), status='started')
+
+# Count
+IncidentReport.objects.count()
 ```
 
 #### Create Migrations

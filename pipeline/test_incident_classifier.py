@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline.incident_classifier import (
+    ClassificationOutputError,
     LLM_MODEL_DEFAULT,
     classify,
     extract_details,
@@ -104,6 +105,113 @@ def test_classify_uses_default_model_when_none(mock_run, tmp_path):
     assert model == LLM_MODEL_DEFAULT
     args = mock_run.call_args[0][0]
     assert args[args.index("-m") + 1] == LLM_MODEL_DEFAULT
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_raises_when_judgments_file_missing(mock_run, tmp_path):
+    # LLM subprocess "succeeds" but never writes the judgments file. This is a
+    # hard failure (not zero valid judgments), so classify must raise rather
+    # than silently return no judgments.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+    mock_run.return_value = MagicMock(returncode=0)
+
+    try:
+        classify(tmp_path, incidents_path, judgments_path, model="m/x")
+    except ClassificationOutputError as exc:
+        assert str(judgments_path) in str(exc)
+    else:
+        raise AssertionError(
+            "expected ClassificationOutputError when judgments file is missing"
+        )
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_raises_when_judgments_file_is_malformed_json(mock_run, tmp_path):
+    # File exists but is not valid JSON -> structural failure, not empty.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+
+    def fake_run(*args, **kwargs):
+        judgments_path.write_text("this is not json{")
+        return MagicMock(returncode=0)
+
+    mock_run.side_effect = fake_run
+
+    try:
+        classify(tmp_path, incidents_path, judgments_path, model="m/x")
+    except ClassificationOutputError as exc:
+        assert "not valid JSON" in str(exc)
+    else:
+        raise AssertionError("expected ClassificationOutputError on malformed JSON")
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_raises_when_judgments_top_level_not_list(mock_run, tmp_path):
+    # Valid JSON but top-level is an object, not a list -> structural failure.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+
+    def fake_run(*args, **kwargs):
+        judgments_path.write_text('{"judgments": []}')
+        return MagicMock(returncode=0)
+
+    mock_run.side_effect = fake_run
+
+    try:
+        classify(tmp_path, incidents_path, judgments_path, model="m/x")
+    except ClassificationOutputError as exc:
+        assert "expected a JSON list" in str(exc)
+    else:
+        raise AssertionError("expected ClassificationOutputError on non-list top-level")
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_allows_valid_empty_list(mock_run, tmp_path):
+    # A structurally-valid empty list is a genuine "zero judgments" result and
+    # must NOT raise.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+    mock_run.side_effect = _make_fake_subprocess([], judgments_path)
+
+    assert classify(tmp_path, incidents_path, judgments_path, model="m/x") == ("m/x", [])
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_tolerates_all_records_invalid(mock_run, tmp_path):
+    # Valid JSON list whose records all fail per-record validation is NOT a
+    # structural failure: the bad records are skipped (retried next run) and
+    # classify returns an empty list rather than raising.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+    mock_run.side_effect = _make_fake_subprocess(
+        [{"keep": True}, {"entry_id": 5, "keep": "yes"}],
+        judgments_path,
+    )
+
+    assert classify(tmp_path, incidents_path, judgments_path, model="m/x") == ("m/x", [])
+
+
+@patch("pipeline.incident_classifier.subprocess.run")
+def test_classify_passes_absolute_paths_to_prompt(mock_run, tmp_path):
+    # Writer/reader must agree on an unambiguous absolute path, independent of
+    # the subprocess cwd. The prompt (first positional arg after "run") should
+    # contain the absolute incidents and judgments paths.
+    incidents_path = tmp_path / "incidents.json"
+    judgments_path = tmp_path / "judgments.json"
+    incidents_path.write_text("[]")
+    mock_run.side_effect = _make_fake_subprocess([], judgments_path)
+
+    classify(tmp_path, incidents_path, judgments_path, model="m/x")
+
+    prompt = mock_run.call_args[0][0][2]
+    assert str(incidents_path) in prompt
+    assert str(judgments_path) in prompt
 
 
 # ---------- parse_judgments: file / JSON / top-level shape ----------

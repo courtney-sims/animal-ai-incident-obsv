@@ -16,10 +16,12 @@ from pathlib import Path
 from unittest import mock
 
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.utils import timezone
 
 from dash.models import IncidentReport, PipelineRun
+from pipeline.incident_classifier import ClassificationOutputError
 from pipeline.incident_fetcher import URL
 
 
@@ -365,3 +367,45 @@ class RunPipelineTestCase(TestCase):
         o1 = IncidentReport.objects.get(source_id="https://openalex.org/W1")
         self.assertEqual(n1.status, IncidentReport.StatusType.pending)
         self.assertEqual(o1.status, IncidentReport.StatusType.llm_rel)
+
+    # -- 10. missing judgments file is a hard failure ----------------------
+
+    def test_missing_judgments_file_marks_run_failed(self):
+        def missing_file(workdir, incidents_path, judgments_path, model=None):
+            # Mirrors classify() when the LLM never produced the judgments
+            # file: a hard failure, not a silent no-op.
+            raise ClassificationOutputError(
+                f"classify: judgments file was not produced at {judgments_path}"
+            )
+
+        with self.assertRaises(CommandError):
+            self._call([nhtsa_entry("N1")], missing_file, fake_extract())
+
+        # the run is logged failed, not completed
+        run = PipelineRun.objects.order_by("-started_at").first()
+        self.assertEqual(run.status, PipelineRun.Status.FAILED)
+        self.assertIsNotNone(run.completed_at)
+
+        # the ingested row stays `new` so the next run retries it
+        n1 = IncidentReport.objects.get(source_id="N1")
+        self.assertEqual(n1.status, IncidentReport.StatusType.new)
+
+    # -- 11. structurally-invalid judgments file is a hard failure ---------
+
+    def test_invalid_judgments_file_marks_run_failed(self):
+        def invalid_file(workdir, incidents_path, judgments_path, model=None):
+            # Mirrors classify() when the LLM wrote a structurally invalid file
+            # (malformed JSON / non-list top-level): a hard failure.
+            raise ClassificationOutputError(
+                f"classify: judgments file at {judgments_path} is not valid JSON"
+            )
+
+        with self.assertRaises(CommandError):
+            self._call([nhtsa_entry("N1")], invalid_file, fake_extract())
+
+        run = PipelineRun.objects.order_by("-started_at").first()
+        self.assertEqual(run.status, PipelineRun.Status.FAILED)
+        self.assertIsNotNone(run.completed_at)
+
+        n1 = IncidentReport.objects.get(source_id="N1")
+        self.assertEqual(n1.status, IncidentReport.StatusType.new)

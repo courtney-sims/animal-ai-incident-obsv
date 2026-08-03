@@ -221,3 +221,5 @@ __marimo__/
 *.json
 *.json.bak
 animal_incidents*.csv
+# Auto-deleting pipeline workdir tempdirs (created inside the project tree)
+tmp*/

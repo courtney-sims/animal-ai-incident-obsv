@@ -2,3 +2,4 @@ requests
 tablib
 psycopg
 django
+django-environ

@@ -1,6 +1,8 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 import tablib
@@ -8,10 +10,53 @@ import tablib
 from pipeline.classifier_types import Judgment
 
 
-URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
 OUTPUT_PATH = Path("incidents.json")
-OPENALEX_BASE_URL = "https://api.openalex.org/works"
+OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO")
+# OpenAlex meters the API by a daily USD budget: $1/day with a (free) key vs
+# only $0.01/day without one. Our query is a search op (~$0.001/request), so an
+# unauthenticated run can't even complete one paginated pass (~10 req/day cap).
+# Get a free key at https://openalex.org/settings/api and set OPENALEX_API_KEY.
+OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY")
 
+# ---------- Sources ----------
+
+
+OPEN_ALEX = "openalex_work"
+OPENALEX_BASE_URL = "https://api.openalex.org/works"
+# Rolling window (in days) back from ``now`` used to filter OpenAlex works by
+# publication date. A window (rather than "since last run") absorbs OpenAlex
+# indexing lag: works often appear days-to-weeks after their publication date,
+# so re-scanning the recent past on every run catches late-indexed papers.
+# Measured lag on a real sample: median ~6d, p99 ~33d, max ~87d — 90 days keeps
+# lag-driven misses at ~0%. Re-fetching is harmless — ingestion upserts on
+# (source, source_id) and never resets status, so already-judged rows just get
+# their raw_data refreshed.
+OPENALEX_LOOKBACK_DAYS = 90
+# Cap on cursor-paginated pages per run (per_page=100 => up to 3000 works) as a
+# safety valve against an unexpectedly huge result set and runaway LLM load.
+# The scoped query below yields ~2.3k works at the 90-day window, so 3000 leaves
+# headroom without silently dropping results. per_page is 100 because that is
+# OpenAlex's documented maximum.
+OPENALEX_MAX_PAGES = 30
+OPENALEX_PER_PAGE = 100
+
+# Scoped OpenAlex query terms. The observatory targets works where AI/autonomous
+# systems harm non-human animals, so we require a term from BOTH lists. Using
+# OpenAlex's pipe (OR-within-a-filter) and repeated-filter (AND-across-filters)
+# syntax instead of inline boolean operators avoids the free-tier boolean-
+# operator limit (which returns 429). `search=animal` alone matched ~38k works
+# (19x over the fetch cap); this pair keeps the 90-day window near ~2.3k.
+# These are the recall/precision lever — tune here.
+OPENALEX_ANIMAL_TERMS = [
+    "animal", "animals", "wildlife", "livestock", "deer", "bird", "cattle",
+]
+OPENALEX_TECH_TERMS = [
+    "autonomous vehicle", "self-driving", "artificial intelligence",
+    "machine learning", "drone", "robot",
+]
+
+NHTSA = "nhtsa_incident_report"
+URL = "https://static.nhtsa.gov/odi/ffdd/sgo-2021-01/SGO-2021-01_Incident_Reports_ADS.csv"
 
 
 # ---------- HTTP fetching ----------
@@ -23,12 +68,78 @@ def fetch_csv(url: str) -> str:
     return response.text
 
 
+_REDACT_PARAMS = ("api_key", "mailto")
+
+
+def _redact_url(url: str) -> str:
+    """Return ``url`` with sensitive query params masked.
+
+    Keeps the key/email out of logs and tracebacks (the error path prints the
+    request URL). Values for :data:`_REDACT_PARAMS` become ``REDACTED``.
+    """
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    redacted = [
+        (k, "REDACTED" if k in _REDACT_PARAMS else v) for k, v in pairs
+    ]
+    return urlunsplit(parts._replace(query=urlencode(redacted)))
+
+
 def query_openalex(params: dict) -> list[dict]:
-    # Eventually, log and skip the source on error. Right now, just bubble it up for dev
-    response = requests.get(OPENALEX_BASE_URL, params=params)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("results", [])
+    """Fetch all OpenAlex works for ``params``, following cursor pagination.
+
+    Starts at ``cursor=*`` and follows ``meta.next_cursor`` until it is empty,
+    accumulating ``results`` across pages. Stops early at
+    :data:`OPENALEX_MAX_PAGES` (logging when the cap is hit) to bound result
+    volume and LLM load. ``per_page`` is forced to :data:`OPENALEX_PER_PAGE`.
+
+    Authentication: ``OPENALEX_API_KEY`` (if set) is sent as the ``api_key``
+    query param, which OpenAlex requires for its $1/day free budget. The key is
+    redacted from any URL included in a raised error so it never lands in logs.
+
+    On a non-OK response the raised error includes the HTTP status and a snippet
+    of the response body, so policy/plan/budget errors (which OpenAlex may serve
+    as a 429 with a descriptive body) are not mistaken for plain rate limiting.
+    """
+    params = dict(params)
+    if OPENALEX_MAILTO:
+        params["mailto"] = OPENALEX_MAILTO
+    if OPENALEX_API_KEY:
+        params["api_key"] = OPENALEX_API_KEY
+    params["per_page"] = OPENALEX_PER_PAGE
+
+    results: list[dict] = []
+    cursor = "*"
+    for page in range(OPENALEX_MAX_PAGES):
+        # Fresh dict per request so each call gets its own cursor value.
+        page_params = {**params, "cursor": cursor}
+        # Eventually, log and skip the source on error. Right now, bubble it up
+        # for dev — but with the body attached so the cause is diagnosable.
+        response = requests.get(OPENALEX_BASE_URL, params=page_params)
+        if not response.ok:
+            snippet = (response.text or "")[:500]
+            raise requests.exceptions.HTTPError(
+                f"OpenAlex request failed: {response.status_code} "
+                f"{response.reason} for url {_redact_url(response.url)} — "
+                f"body: {snippet}",
+                response=response,
+            )
+        data = response.json()
+        results.extend(data.get("results", []))
+
+        cursor = (data.get("meta") or {}).get("next_cursor")
+        if not cursor:
+            break
+    else:
+        print(
+            f"query_openalex: hit OPENALEX_MAX_PAGES={OPENALEX_MAX_PAGES} "
+            f"(per_page={OPENALEX_PER_PAGE}); results beyond "
+            f"{OPENALEX_MAX_PAGES * OPENALEX_PER_PAGE} works were not fetched"
+        )
+
+    return results
 
 
 def reconstruct_abstract(inverted_index: dict | None) -> str | None:
@@ -160,34 +271,7 @@ def trim_openalex_fields(rows: list[dict]) -> list[dict]:
     return result
 
 
-# ---------- Date filtering, CSV parsing, JSON writing ----------
-
-
-def filter_by_date(
-    data: list[dict],
-    months_back: int = 1,
-    now: datetime = datetime.now(),
-) -> list[dict]:
-    """Return rows where ``Incident Date`` is within the last ``months_back`` months.
-
-    ``Incident Date`` is expected in ``"%b-%Y"`` form (e.g. ``"JUN-2026"``). Rows
-    with a missing, blank, or unparseable date are dropped and logged.
-    """
-    result = []
-    for row in data:
-        date_str = row.get("Incident Date", "")
-        if not date_str or not date_str.strip():
-            print(f'Could not get incident date from {row}')
-            continue
-        try:
-            dt = datetime.strptime(date_str.strip(), "%b-%Y")
-        except ValueError:
-            print(f'Could not parse month and year from {date_str}')
-            continue
-        months_diff = (now.year - dt.year) * 12 + (now.month - dt.month)
-        if months_diff < months_back:
-            result.append(row)
-    return result
+# ---------- CSV parsing and JSON writing ----------
 
 
 def parse_csv(text: str) -> list[dict]:
@@ -206,30 +290,59 @@ def write_json(data: list[dict], path: Path) -> None:
 # ---------- Collection ----------
 
 
-def collect_data(now: datetime = datetime.now()) -> list[dict]:
+def collect_data(
+    now: datetime = datetime.now(),
+    since: datetime | None = None,
+    already_ingested: set[str] | None = None,
+) -> list[dict]:
     """Fetch and tag entries from all configured sources.
 
-    Returns untrimmed entries with an ``aaiid_data_source`` field. Trimming
-    happens later in ``assemble_csv``.
+    Returns untrimmed entries with an ``aaiid_data_source`` field.
     """
-    csv_text = fetch_csv(URL)
-    data = parse_csv(csv_text)
-    # Might be relevant later, but for now the csv we have is a constant data source of Jun 2025-May 2026
-    # data = filter_by_date(data, now=now)
-    for row in data:
-        row["aaiid_data_source"] = "nhtsa_incident_report"
+    already_ingested = already_ingested or set()
+    data: list[dict] = []
 
-    thirty_days_ago = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    if NHTSA not in already_ingested:
+        csv_text = fetch_csv(URL)
+        data = parse_csv(csv_text)
+        for row in data:
+            row["aaiid_data_source"] = NHTSA
+    else:
+        print(f"collect_data: {NHTSA} already ingested; skipping")
+
+    # Always scan a fixed rolling window rather than "since last run": OpenAlex
+    # indexes many works after their publication_date, so a work published just
+    # before the last run may only appear now. The window re-catches those; the
+    # `since` arg is intentionally ignored for OpenAlex (upserts make re-fetching
+    # harmless). from_publication_date is used because from_created_date is now
+    # gated behind a paid OpenAlex plan (returns 429 "Plan upgrade required").
+    from_date = (now - timedelta(days=OPENALEX_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    # (animal OR animals OR ...) AND (autonomous vehicle OR ...) expressed with
+    # pipe-OR and repeated-filter-AND so it stays within the free-tier boolean
+    # limit. See OPENALEX_ANIMAL_TERMS / OPENALEX_TECH_TERMS for the term lists.
+    animal_clause = "|".join(OPENALEX_ANIMAL_TERMS)
+    tech_clause = "|".join(OPENALEX_TECH_TERMS)
+    openalex_filter = (
+        f"from_publication_date:{from_date},"
+        f"title_and_abstract.search:{animal_clause},"
+        f"title_and_abstract.search:{tech_clause}"
+    )
     params = {
         "sort": "publication_date:desc",
-        "per_page": 25,
-        "search": "animal",
-        "filter": f"from_publication_date:{thirty_days_ago}",
+        "filter": openalex_filter,
         "select": "id,title,display_name,publication_year,publication_date,doi,abstract_inverted_index,primary_location,keywords,referenced_works,concepts",
     }
-    papers = query_openalex(params)
+    # Failure isolation: an OpenAlex outage or a spent daily budget (429) must
+    # not abort the whole ingest. Log and skip the source so NHTSA rows and
+    # downstream classification/extraction of already-ingested rows still run.
+    try:
+        papers = query_openalex(params)
+    except requests.exceptions.RequestException as exc:
+        print(f"collect_data: OpenAlex fetch failed ({exc}); skipping source")
+        papers = []
+
     for paper in papers:
-        paper["aaiid_data_source"] = "openalex_work"
+        paper["aaiid_data_source"] = OPEN_ALEX
         paper["abstract"] = reconstruct_abstract(
             paper.pop("abstract_inverted_index", None)
         )
@@ -263,9 +376,9 @@ _JSON_BLOB_STRIP = {"aaiid_data_source", "entry_id"}
 
 def _trim_entry(entry: dict) -> dict:
     source = entry.get("aaiid_data_source")
-    if source == "nhtsa_incident_report":
+    if source == NHTSA:
         trimmed = trim_nhtsa_fields([entry])[0]
-    elif source == "openalex_work":
+    elif source == OPEN_ALEX:
         trimmed = trim_openalex_fields([entry])[0]
     else:
         # unknown source: pass through as-is minus internal fields
@@ -280,9 +393,9 @@ def _source_id(entry: dict) -> str:
     to an empty string when the expected key is absent.
     """
     source = entry.get("aaiid_data_source")
-    if source == "nhtsa_incident_report":
+    if source == NHTSA:
         return entry.get("Report ID", "") or ""
-    if source == "openalex_work":
+    if source == OPEN_ALEX:
         return entry.get("id", "") or ""
     return ""
 
@@ -297,7 +410,7 @@ def map_direct_fields(entry: dict) -> dict:
     source = entry.get("aaiid_data_source")
     fields: dict = {}
 
-    if source == "nhtsa_incident_report":
+    if source == NHTSA:
         # No per-report public URL exists; the bulk SGO CSV is the source.
         fields["url"] = URL
         city = entry.get("City", "")
@@ -309,13 +422,15 @@ def map_direct_fields(entry: dict) -> dict:
         raw_date = entry.get("Incident Date", "")
         if raw_date:
             try:
-                fields["time_occurred"] = datetime.strptime(raw_date, "%b-%Y")
+                fields["time_occurred"] = datetime.strptime(raw_date, "%b-%Y").replace(
+                    tzinfo=timezone.utc
+                )
             except ValueError:
                 print(
                     f"map_direct_fields: could not parse Incident Date "
                     f"{raw_date!r} as '%b-%Y'; omitting time_occurred"
                 )
-    elif source == "openalex_work":
+    elif source == OPEN_ALEX:
         url = (
             _get_dotted(entry, "primary_location.landing_page_url")
             or _get_dotted(entry, "primary_location.pdf_url")
@@ -328,8 +443,15 @@ def map_direct_fields(entry: dict) -> dict:
             fields["title"] = title
         pub_date = entry.get("publication_date", "")
         if pub_date:
-            fields["time_reported"] = pub_date
-
+            try:
+                fields["time_reported"] = datetime.strptime(
+                    pub_date, "%Y-%m-%d"
+                ).replace(tzinfo=timezone.utc)
+            except ValueError:
+                print(
+                    f"map_direct_fields: could not parse publication_date "
+                    f"{pub_date!r} as '%Y-%m-%d'; omitting time_reported"
+                )
     return fields
 
 
