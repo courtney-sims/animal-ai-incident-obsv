@@ -23,19 +23,30 @@ The command runs in phases, each crash-safe against the next:
    columns that still hold their default (deterministic and human values win).
    Extracted rows advance to ``pending``. This phase is failure-isolated: an
    extraction crash never rolls back the already-committed judgment updates.
+
+Crash resilience: the intermediate JSON is written to a persistent
+``pipeline_runs/`` directory (inside the project tree) by default rather than an
+auto-deleted tempdir, so the expensive LLM output survives a crash and a later
+run can resume from it instead of re-running the LLM. Each persist loop saves one
+row at a time in autocommit mode (no giant ``transaction.atomic()`` wrapper) and
+reconnects-and-retries on a transient ``OperationalError`` (Neon serverless can
+drop a stale connection during the long LLM call), so a mid-batch connection drop
+preserves every row committed before it.
 """
 
 import contextlib
 import subprocess
 import sys
-import tempfile
+import time
 from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import close_old_connections, connection
+from django.db.utils import OperationalError
 from django.utils import timezone
 
+from dash.judgment_persistence import apply_judgments_to_db, retry_save
 from dash.models import IncidentReport, PipelineRun, SourceIngestion
 from pipeline import incident_classifier, incident_fetcher
 from pipeline.main import get_data_paths
@@ -44,6 +55,19 @@ from pipeline.main import get_data_paths
 # Columns fillable by the extraction pass, mapped to their model default. An
 # extracted value is written only when the column still holds this default, so
 # deterministic (4a) values and human edits always win.
+def _drop_stale_connection():
+    """Drop a possibly-stale DB connection so the next query reconnects.
+
+    Called just before the long, DB-idle LLM subprocess so the persist phase
+    opens a fresh connection (Neon serverless suspends idle endpoints and kills
+    the connection). Guarded by ``in_atomic_block`` because closing a connection
+    mid-transaction is unsafe — production runs these phases outside any
+    transaction, while the test suite wraps each test in one.
+    """
+    if not connection.in_atomic_block:
+        close_old_connections()
+
+
 _FILL_DEFAULTS = {
     "title": "",
     "description": "",
@@ -72,7 +96,9 @@ class Command(BaseCommand):
             help=(
                 "Directory for the pipeline's intermediate JSON files. If given, "
                 "the files are written there and left in place (debug override). "
-                "If omitted, a temporary directory is used and auto-deleted."
+                "If omitted, they are kept in a persistent 'pipeline_runs/' "
+                "directory in the project tree so a crash cannot delete the LLM "
+                "output and a later run can resume from it."
             ),
         )
 
@@ -94,18 +120,22 @@ class Command(BaseCommand):
         judged_relevant = judged_llm_rejected = still_unjudged = 0
         extracted = still_unextracted = 0
 
-        # A single workdir spans both LLM phases so --workdir debug files land
-        # in one place. A tempdir auto-deletes; an explicit --workdir is left.
+        # A single workdir spans both LLM phases so intermediate files land in
+        # one place. Both the explicit --workdir and the default persist (no
+        # auto-delete) so the expensive LLM output survives a crash and a later
+        # run can resume from it.
         #
-        # The tempdir is created *inside* the project tree (not the system
-        # default /tmp) because the opencode subprocess confines its file
-        # writes to its detected project/worktree. A /tmp workdir sits outside
-        # that scope, so the LLM's judgments file landed in the project root
-        # instead of the workdir and the reader never found it.
+        # The default lives *inside* the project tree (not the system default
+        # /tmp) because the opencode subprocess confines its file writes to its
+        # detected project/worktree. A /tmp workdir sits outside that scope, so
+        # the LLM's judgments file would land in the project root instead of the
+        # workdir and the reader would never find it.
         if options["workdir"]:
             workdir_ctx = contextlib.nullcontext(options["workdir"])
         else:
-            workdir_ctx = tempfile.TemporaryDirectory(dir=settings.BASE_DIR.parent)
+            default_workdir = settings.BASE_DIR.parent / "pipeline_runs"
+            default_workdir.mkdir(parents=True, exist_ok=True)
+            workdir_ctx = contextlib.nullcontext(default_workdir)
 
         try:
             with workdir_ctx as wd:
@@ -155,8 +185,25 @@ class Command(BaseCommand):
             raise
 
         finally:
+            # Persist the final run status even if the connection went stale
+            # during the long LLM phase. Retry a couple times on a transient
+            # OperationalError, but never mask the original exception (if any):
+            # the original failure is what should propagate.
             run.completed_at = timezone.now()
-            run.save(update_fields=["status", "completed_at"])
+            for attempt in range(3):
+                try:
+                    run.save(update_fields=["status", "completed_at"])
+                    break
+                except OperationalError as exc:
+                    close_old_connections()
+                    if attempt == 2:
+                        print(
+                            "run_pipeline: could not persist final run status "
+                            f"({exc!r})",
+                            file=sys.stderr,
+                        )
+                        break
+                    time.sleep(1.0 * 2 ** attempt)
 
         # --- Phase 3e/4b.3: summary ---
         self._write_summary(
@@ -191,42 +238,46 @@ class Command(BaseCommand):
 
         sources_seen: set[str] = set()
 
-        with transaction.atomic():
-            for entry in entries:
-                source = entry.get("aaiid_data_source")
-                if source:
-                    sources_seen.add(source)
+        # Each upsert is independent (natural key on (source, source_id)), so no
+        # surrounding transaction is needed. A mid-ingest connection drop thus
+        # preserves the partial upserts; the missing rows are picked up on the
+        # next run. collect_data() already ran above, outside any retry, so a
+        # retry never re-fetches network data.
+        for entry in entries:
+            source = entry.get("aaiid_data_source")
+            if source:
+                sources_seen.add(source)
 
-                prepared = incident_fetcher.prepare_entry(entry)
-                if not prepared["source_id"]:
-                    print(
-                        "run_pipeline: skipping entry with empty source_id "
-                        f"(source={prepared['aaiid_data_source']!r}); "
-                        "no natural key to upsert on",
-                        file=sys.stderr,
-                    )
-                    continue
-
-                # raw_data plus deterministic per-source columns are refreshed
-                # on both create and update so source corrections propagate;
-                # time_ingested is applied only on creation (create_defaults) so
-                # reruns preserve the original ingest time. status and the
-                # judgment/extraction fields are never set here, so the model
-                # default and any human edits survive.
-                defaults = {
-                    "raw_data": prepared["json_blob"],
-                    **incident_fetcher.map_direct_fields(entry),
-                }
-                _, created = IncidentReport.objects.update_or_create(
-                    source=prepared["aaiid_data_source"],
-                    source_id=prepared["source_id"],
-                    defaults=defaults,
-                    create_defaults={**defaults, "time_ingested": now},
+            prepared = incident_fetcher.prepare_entry(entry)
+            if not prepared["source_id"]:
+                print(
+                    "run_pipeline: skipping entry with empty source_id "
+                    f"(source={prepared['aaiid_data_source']!r}); "
+                    "no natural key to upsert on",
+                    file=sys.stderr,
                 )
-                if created:
-                    created_count += 1
-                else:
-                    refreshed_count += 1
+                continue
+
+            # raw_data plus deterministic per-source columns are refreshed
+            # on both create and update so source corrections propagate;
+            # time_ingested is applied only on creation (create_defaults) so
+            # reruns preserve the original ingest time. status and the
+            # judgment/extraction fields are never set here, so the model
+            # default and any human edits survive.
+            defaults = {
+                "raw_data": prepared["json_blob"],
+                **incident_fetcher.map_direct_fields(entry),
+            }
+            _, created = self._upsert_with_retry(
+                source=prepared["aaiid_data_source"],
+                source_id=prepared["source_id"],
+                defaults=defaults,
+                create_defaults={**defaults, "time_ingested": now},
+            )
+            if created:
+                created_count += 1
+            else:
+                refreshed_count += 1
 
         for source in sources_seen:
             SourceIngestion.objects.update_or_create(
@@ -235,6 +286,28 @@ class Command(BaseCommand):
             )
 
         return created_count, refreshed_count
+
+    def _upsert_with_retry(self, *, source, source_id, defaults, create_defaults,
+                           attempts=3, base_delay=1.0):
+        """update_or_create with reconnect-and-retry on transient drops.
+
+        Mirrors :func:`dash.judgment_persistence.retry_save` for the ingest
+        upsert (which is a self-contained SELECT-then-INSERT/UPDATE on the
+        natural key). Only ``OperationalError`` is retried.
+        """
+        for attempt in range(attempts):
+            try:
+                return IncidentReport.objects.update_or_create(
+                    source=source,
+                    source_id=source_id,
+                    defaults=defaults,
+                    create_defaults=create_defaults,
+                )
+            except OperationalError:
+                close_old_connections()
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(base_delay * 2 ** attempt)
 
     def _build_llm_input(self, reports):
         """Build the LLM input list and an ``{entry_id: report}`` map.
@@ -255,67 +328,112 @@ class Command(BaseCommand):
             })
         return input_list, reports_by_entry_id
 
+    @staticmethod
+    def _model_sidecar_path(data_path: Path) -> Path:
+        """The ``.model`` sidecar path for a judgments/details JSON file."""
+        return Path(str(data_path) + ".model")
+
+    def _write_model_sidecar(self, data_path: Path, model: str) -> None:
+        """Persist the model string that produced ``data_path``.
+
+        The judgments/details JSON don't record which model produced them, so a
+        later resume run reads this sidecar to persist ``llm_model`` accurately.
+        """
+        self._model_sidecar_path(data_path).write_text(model)
+
+    def _read_model_sidecar(self, data_path: Path) -> str | None:
+        """Return the model recorded for ``data_path``, or ``None`` if absent."""
+        sidecar = self._model_sidecar_path(data_path)
+        if not sidecar.exists():
+            return None
+        return sidecar.read_text().strip()
+
+    def _find_reusable_judgments(self, workdir, wanted_ids):
+        """Return ``(model, judgments)`` from a reusable file, or ``None``.
+
+        Scans ``judgments_*.json`` newest-first. A file is reusable when it has
+        an accompanying ``.model`` sidecar (so ``llm_model`` is never guessed)
+        and its validated entry_ids are a superset of ``wanted_ids``. Resume is
+        all-or-nothing: a file covering only some of the queue is ignored.
+        """
+        if not wanted_ids:
+            return None
+        for path in sorted(workdir.glob("judgments_*.json"), reverse=True):
+            model = self._read_model_sidecar(path)
+            if model is None:
+                continue
+            judgments = incident_classifier.parse_judgments(path)
+            file_ids = {j["entry_id"] for j in judgments}
+            if wanted_ids <= file_ids:
+                return model, judgments
+        return None
+
+    def _find_reusable_details(self, workdir, wanted_ids):
+        """Return ``(model, details)`` from a reusable file, or ``None``.
+
+        Mirrors :meth:`_find_reusable_judgments` for the extraction phase. The
+        glob is ``details_[0-9]*.json`` (leading digit of the timestamp) so it
+        excludes the ``details_input_*.json`` input files.
+        """
+        if not wanted_ids:
+            return None
+        for path in sorted(workdir.glob("details_[0-9]*.json"), reverse=True):
+            model = self._read_model_sidecar(path)
+            if model is None:
+                continue
+            details = incident_classifier.parse_details(path)
+            file_ids = {d["entry_id"] for d in details}
+            if wanted_ids <= file_ids:
+                return model, details
+        return None
+
     def _classify(self, unjudged, workdir, model_opt, now):
         """Phases 3c/3d: classify then persist judgments.
 
         Returns ``(model, judged_relevant, judged_llm_rejected, still_unjudged)``.
         """
         input_list, reports_by_entry_id = self._build_llm_input(unjudged)
+        wanted_ids = set(reports_by_entry_id)
 
-        incidents_path, judgments_path = get_data_paths(workdir)
-        incident_fetcher.write_json(input_list, incidents_path)
-        try:
-            model, judgments = incident_classifier.classify(
-                workdir, incidents_path, judgments_path, model_opt
-            )
-        except (
-            subprocess.CalledProcessError,
-            incident_classifier.ClassificationOutputError,
-        ) as exc:
-            # Ingested rows are already committed as `new`, so the next run
-            # resumes exactly where this one failed. A missing or structurally
-            # invalid judgments file (ClassificationOutputError) is a hard
-            # failure, not a silent no-op: it propagates so the run is logged
-            # `failed` rather than `completed`.
-            raise CommandError(f"Pipeline classification failed: {exc}") from exc
-
-        judged_relevant = 0
-        judged_llm_rejected = 0
-        judged_ids: set[str] = set()
-
-        with transaction.atomic():
-            for j in judgments:
-                entry_id = j["entry_id"]
-                report = reports_by_entry_id.get(entry_id)
-                if report is None:
-                    print(
-                        "run_pipeline: judgment has unknown entry_id "
-                        f"{entry_id!r} (not among {len(reports_by_entry_id)} "
-                        "unjudged rows); skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-                judged_ids.add(entry_id)
-
-                if j["keep"]:
-                    report.status = IncidentReport.StatusType.llm_rel
-                    judged_relevant += 1
-                else:
-                    report.status = IncidentReport.StatusType.llm_rej
-                    judged_llm_rejected += 1
-                report.llm_reasoning = j["reasoning"]
-                report.confidence = IncidentReport.CONFIDENCE_MAP.get(
-                    j["confidence"], 0
+        # Resume path: if a prior judgments file in the workdir already covers
+        # this queue's entry_ids, reuse it and skip the expensive LLM call.
+        resume = self._find_reusable_judgments(workdir, wanted_ids)
+        if resume is not None:
+            model, judgments = resume
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "Reusing existing judgments file; skipping the LLM "
+                    f"classify call (model={model})."
                 )
-                report.llm_model = model
-                report.time_judged = now
-                report.save(update_fields=[
-                    "status",
-                    "llm_reasoning",
-                    "confidence",
-                    "llm_model",
-                    "time_judged",
-                ])
+            )
+        else:
+            incidents_path, judgments_path = get_data_paths(workdir)
+            incident_fetcher.write_json(input_list, incidents_path)
+            # Drop any connection that may have gone stale before the long,
+            # DB-idle LLM call so the persist phase opens a fresh one.
+            _drop_stale_connection()
+            try:
+                model, judgments = incident_classifier.classify(
+                    workdir, incidents_path, judgments_path, model_opt
+                )
+            except (
+                subprocess.CalledProcessError,
+                incident_classifier.ClassificationOutputError,
+            ) as exc:
+                # Ingested rows are already committed as `new`, so the next run
+                # resumes exactly where this one failed. A missing or
+                # structurally invalid judgments file (ClassificationOutputError)
+                # is a hard failure, not a silent no-op: it propagates so the run
+                # is logged `failed` rather than `completed`.
+                raise CommandError(f"Pipeline classification failed: {exc}") from exc
+
+            # Record which model produced this file so a later resume run can
+            # persist llm_model accurately (the JSON itself doesn't carry it).
+            self._write_model_sidecar(judgments_path, model)
+
+        judged_ids, judged_relevant, judged_llm_rejected, _skipped, _unknown = (
+            apply_judgments_to_db(judgments, reports_by_entry_id, model, now)
+        )
 
         # Rows the LLM never returned a valid judgment for stay `new`; they'll
         # be retried next run. Mirrors build_records's "missing" report.
@@ -335,46 +453,62 @@ class Command(BaseCommand):
         Returns ``(model, extracted, still_unextracted)``.
         """
         input_list, reports_by_entry_id = self._build_llm_input(relevant)
+        wanted_ids = set(reports_by_entry_id)
 
-        ts = timezone.now().strftime("%Y%m%d_%H%M%S")
-        input_path = workdir / f"details_input_{ts}.json"
-        output_path = workdir / f"details_{ts}.json"
-        incident_fetcher.write_json(input_list, input_path)
-
-        model, details = incident_classifier.extract_details(
-            workdir, input_path, output_path, model_opt
-        )
+        # Resume path: reuse a prior details file that covers this queue.
+        resume = self._find_reusable_details(workdir, wanted_ids)
+        if resume is not None:
+            model, details = resume
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "Reusing existing details file; skipping the LLM extract "
+                    f"call (model={model})."
+                )
+            )
+        else:
+            ts = timezone.now().strftime("%Y%m%d_%H%M%S")
+            input_path = workdir / f"details_input_{ts}.json"
+            output_path = workdir / f"details_{ts}.json"
+            incident_fetcher.write_json(input_list, input_path)
+            # Drop any stale connection before the long, DB-idle LLM call.
+            _drop_stale_connection()
+            model, details = incident_classifier.extract_details(
+                workdir, input_path, output_path, model_opt
+            )
+            self._write_model_sidecar(output_path, model)
 
         extracted = 0
         applied_ids: set[str] = set()
 
-        with transaction.atomic():
-            for d in details:
-                entry_id = d["entry_id"]
-                report = reports_by_entry_id.get(entry_id)
-                if report is None:
-                    print(
-                        "run_pipeline: detail has unknown entry_id "
-                        f"{entry_id!r} (not among {len(reports_by_entry_id)} "
-                        "relevant rows); skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-                applied_ids.add(entry_id)
+        # Per-row autocommit (no transaction wrapper): each save is an
+        # independent single-row UPDATE, so a mid-batch drop preserves earlier
+        # rows and retryable saves reconnect via retry_save.
+        for d in details:
+            entry_id = d["entry_id"]
+            report = reports_by_entry_id.get(entry_id)
+            if report is None:
+                print(
+                    "run_pipeline: detail has unknown entry_id "
+                    f"{entry_id!r} (not among {len(reports_by_entry_id)} "
+                    "relevant rows); skipping",
+                    file=sys.stderr,
+                )
+                continue
 
-                update_fields = []
-                for col, default in _FILL_DEFAULTS.items():
-                    # Fill only if the column still holds its default, so
-                    # deterministic (4a) values and human edits always win.
-                    if getattr(report, col) == default:
-                        setattr(report, col, d[col])
-                        update_fields.append(col)
+            update_fields = []
+            for col, default in _FILL_DEFAULTS.items():
+                # Fill only if the column still holds its default, so
+                # deterministic (4a) values and human edits always win.
+                if getattr(report, col) == default:
+                    setattr(report, col, d[col])
+                    update_fields.append(col)
 
-                report.status = IncidentReport.StatusType.pending
-                report.time_hydrated = now
-                update_fields += ["status", "time_hydrated"]
-                report.save(update_fields=update_fields)
-                extracted += 1
+            report.status = IncidentReport.StatusType.pending
+            report.time_hydrated = now
+            update_fields += ["status", "time_hydrated"]
+            retry_save(report, update_fields)
+            applied_ids.add(entry_id)
+            extracted += 1
 
         # Rows the LLM omitted or that failed parse_details validation stay
         # llm_relevant; log a count (mirrors the missing-judgments report).

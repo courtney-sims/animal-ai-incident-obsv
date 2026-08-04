@@ -223,3 +223,6 @@ __marimo__/
 animal_incidents*.csv
 # Auto-deleting pipeline workdir tempdirs (created inside the project tree)
 tmp*/
+# Persistent pipeline workdir: keeps LLM output (judgments/details JSON) across
+# crashes so a later run can resume from it instead of re-running the LLM.
+pipeline_runs/

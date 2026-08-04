@@ -11,12 +11,14 @@ the command writes to its (temp) workdir, so they see the exact pk-derived
 import contextlib
 from datetime import timedelta
 import json
+import tempfile
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db.utils import OperationalError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -126,17 +128,26 @@ def fake_extract(seen=None, detail_fn=None, skip_fn=None):
 
 
 class RunPipelineTestCase(TestCase):
-    def _call(self, collect_return, classify_side, extract_side):
-        """Run the command with all external calls mocked; return (mocks, out, err)."""
+    def _call(self, collect_return, classify_side, extract_side, workdir=None):
+        """Run the command with all external calls mocked; return (mocks, out, err).
+
+        A ``--workdir`` is always passed so tests never touch the persistent
+        ``pipeline_runs/`` directory. When ``workdir`` is omitted a throwaway
+        tempdir is used; pass an explicit path to seed/inspect resume files.
+        """
         out, err = StringIO(), StringIO()
-        with mock.patch(
+        if workdir is None:
+            wd_ctx = tempfile.TemporaryDirectory()
+        else:
+            wd_ctx = contextlib.nullcontext(str(workdir))
+        with wd_ctx as wd, mock.patch(
             "pipeline.incident_fetcher.collect_data", return_value=collect_return
         ), mock.patch(
             "pipeline.incident_classifier.classify", side_effect=classify_side
         ) as m_classify, mock.patch(
             "pipeline.incident_classifier.extract_details", side_effect=extract_side
         ) as m_extract, contextlib.redirect_stderr(err):
-            call_command("run_pipeline", stdout=out)
+            call_command("run_pipeline", "--workdir", wd, stdout=out)
         return m_classify, m_extract, out.getvalue(), err.getvalue()
 
     # -- 1. fresh ingest + judgment + extraction ---------------------------
@@ -409,3 +420,247 @@ class RunPipelineTestCase(TestCase):
 
         n1 = IncidentReport.objects.get(source_id="N1")
         self.assertEqual(n1.status, IncidentReport.StatusType.new)
+
+    # -- 12. resume from a pre-existing judgments file skips the LLM --------
+
+    def test_resume_from_judgments_file_skips_classify(self):
+        with tempfile.TemporaryDirectory() as wd:
+            wd = Path(wd)
+            r1 = _new_report("nhtsa_incident_report", "R1", {"Report ID": "R1"})
+            r2 = _new_report("openalex_work", "R2", {"id": "R2"})
+
+            judgments = [
+                {"entry_id": f"e{r1.pk:04d}", "keep": True,
+                 "reasoning": "kept", "confidence": "High"},
+                {"entry_id": f"e{r2.pk:04d}", "keep": False,
+                 "reasoning": "dropped", "confidence": "Low"},
+            ]
+            jpath = wd / "judgments_20260101_000000.json"
+            jpath.write_text(json.dumps(judgments))
+            (wd / "judgments_20260101_000000.json.model").write_text("seed/model")
+
+            def boom_classify(*args, **kwargs):
+                raise AssertionError("classify must not be called on resume")
+
+            m_classify, _m_extract, out, _err = self._call(
+                [], boom_classify, fake_extract(), workdir=wd
+            )
+
+        m_classify.assert_not_called()
+        self.assertIn("Reusing existing judgments file", out)
+
+        r1.refresh_from_db()
+        r2.refresh_from_db()
+        # kept row was judged from the file (model from the sidecar) and then
+        # extracted to `pending`.
+        self.assertEqual(r1.status, IncidentReport.StatusType.pending)
+        self.assertEqual(r1.llm_model, "seed/model")
+        self.assertEqual(r1.llm_reasoning, "kept")
+        self.assertIsNotNone(r1.time_judged)
+        # rejected row stays llm_rejected and is never extracted
+        self.assertEqual(r2.status, IncidentReport.StatusType.llm_rej)
+        self.assertIsNone(r2.time_hydrated)
+
+    def test_resume_ignored_without_model_sidecar(self):
+        # A judgments file with no .model sidecar must NOT be reused (llm_model
+        # is never guessed); the LLM classify path runs instead.
+        with tempfile.TemporaryDirectory() as wd:
+            wd = Path(wd)
+            r1 = _new_report("nhtsa_incident_report", "R1", {"Report ID": "R1"})
+            jpath = wd / "judgments_20260101_000000.json"
+            jpath.write_text(json.dumps([
+                {"entry_id": f"e{r1.pk:04d}", "keep": True,
+                 "reasoning": "kept", "confidence": "High"},
+            ]))
+            # no sidecar written
+
+            m_classify, _m_extract, out, _err = self._call(
+                [], fake_classify(), fake_extract(), workdir=wd
+            )
+
+        m_classify.assert_called_once()
+        self.assertNotIn("Reusing existing judgments file", out)
+
+
+# ---------------------------------------------------------------------------
+# apply_judgments command + crash-resilient persistence
+# ---------------------------------------------------------------------------
+
+
+def _new_report(source, source_id, raw_data):
+    return IncidentReport.objects.create(
+        source=source,
+        source_id=source_id,
+        raw_data=raw_data,
+        time_ingested=timezone.now(),
+        status=IncidentReport.StatusType.new,
+    )
+
+
+def _write_judgments(path, judgments):
+    Path(path).write_text(json.dumps(judgments))
+
+
+class ApplyJudgmentsTestCase(TestCase):
+    def _judgment(self, report, keep=True, reasoning="because", confidence="High"):
+        return {
+            "entry_id": f"e{report.pk:04d}",
+            "keep": keep,
+            "reasoning": reasoning,
+            "confidence": confidence,
+        }
+
+    # -- 1. applies a valid file -------------------------------------------
+
+    def test_applies_valid_file(self):
+        r1 = _new_report("nhtsa_incident_report", "N1", {"Report ID": "N1"})
+        r2 = _new_report("nhtsa_incident_report", "N2", {"Report ID": "N2"})
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "judgments_x.json"
+            _write_judgments(path, [
+                self._judgment(r1, keep=True, confidence="High"),
+                self._judgment(r2, keep=False, confidence="Low"),
+            ])
+            out = StringIO()
+            call_command(
+                "apply_judgments", judgments=str(path),
+                model="test/model", stdout=out,
+            )
+
+        r1.refresh_from_db()
+        r2.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.llm_rel)
+        self.assertEqual(r1.llm_reasoning, "because")
+        self.assertEqual(r1.confidence, IncidentReport.CONFIDENCE_MAP["High"])
+        self.assertEqual(r1.llm_model, "test/model")
+        self.assertIsNotNone(r1.time_judged)
+
+        self.assertEqual(r2.status, IncidentReport.StatusType.llm_rej)
+        self.assertEqual(r2.confidence, IncidentReport.CONFIDENCE_MAP["Low"])
+        self.assertIsNone(r2.time_hydrated)
+
+    # -- 2. idempotent second run ------------------------------------------
+
+    def test_second_run_is_idempotent(self):
+        r1 = _new_report("nhtsa_incident_report", "N1", {"Report ID": "N1"})
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "judgments_x.json"
+            _write_judgments(path, [self._judgment(r1, keep=True)])
+            call_command("apply_judgments", judgments=str(path), model="m1")
+            r1.refresh_from_db()
+            first_judged = r1.time_judged
+
+            out = StringIO()
+            call_command(
+                "apply_judgments", judgments=str(path), model="m2", stdout=out,
+            )
+
+        r1.refresh_from_db()
+        # already-judged row was skipped; not re-judged / not re-modelled.
+        self.assertEqual(r1.llm_model, "m1")
+        self.assertEqual(r1.time_judged, first_judged)
+        self.assertIn("1 already-judged skipped", out.getvalue())
+
+    # -- 3. unknown entry_id skipped with warning --------------------------
+
+    def test_unknown_entry_id_skipped(self):
+        r1 = _new_report("nhtsa_incident_report", "N1", {"Report ID": "N1"})
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "judgments_x.json"
+            _write_judgments(path, [
+                self._judgment(r1, keep=True),
+                {"entry_id": "e9999", "keep": True,
+                 "reasoning": "ghost", "confidence": "High"},
+            ])
+            out, err = StringIO(), StringIO()
+            with contextlib.redirect_stderr(err):
+                call_command(
+                    "apply_judgments", judgments=str(path),
+                    model="m", stdout=out,
+                )
+
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.llm_rel)
+        self.assertIn("1 unknown", out.getvalue())
+        self.assertIn("unknown entry_id", err.getvalue())
+
+    # -- 4. missing file -> CommandError -----------------------------------
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(CommandError):
+            call_command(
+                "apply_judgments",
+                judgments="/nonexistent/judgments.json",
+                model="m",
+            )
+
+    def test_invalid_json_raises(self):
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "bad.json"
+            path.write_text("{not json")
+            with self.assertRaises(CommandError):
+                call_command("apply_judgments", judgments=str(path), model="m")
+
+    # -- 5. dry-run writes nothing -----------------------------------------
+
+    def test_dry_run_writes_nothing(self):
+        r1 = _new_report("nhtsa_incident_report", "N1", {"Report ID": "N1"})
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "judgments_x.json"
+            _write_judgments(path, [self._judgment(r1, keep=True)])
+            out = StringIO()
+            call_command(
+                "apply_judgments", judgments=str(path),
+                model="m", dry_run=True, stdout=out,
+            )
+
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.new)
+        self.assertIsNone(r1.time_judged)
+        self.assertIn("dry-run", out.getvalue())
+
+    # -- 6. partial-progress preservation on a mid-loop drop ---------------
+
+    def test_partial_progress_preserved_on_operational_error(self):
+        from dash import judgment_persistence
+
+        r1 = _new_report("nhtsa_incident_report", "N1", {"Report ID": "N1"})
+        r2 = _new_report("nhtsa_incident_report", "N2", {"Report ID": "N2"})
+        r3 = _new_report("nhtsa_incident_report", "N3", {"Report ID": "N3"})
+
+        real_retry_save = judgment_persistence.retry_save
+        state = {"n": 0}
+
+        def flaky(report, update_fields, **kwargs):
+            state["n"] += 1
+            if state["n"] == 3:
+                # simulate a connection drop that even retries can't recover
+                raise OperationalError("connection dropped")
+            return real_retry_save(report, update_fields)
+
+        with tempfile.TemporaryDirectory() as wd:
+            path = Path(wd) / "judgments_x.json"
+            _write_judgments(path, [
+                self._judgment(r1, keep=True),
+                self._judgment(r2, keep=False),
+                self._judgment(r3, keep=True),
+            ])
+            with mock.patch(
+                "dash.judgment_persistence.retry_save", side_effect=flaky
+            ):
+                with self.assertRaises(OperationalError):
+                    call_command(
+                        "apply_judgments", judgments=str(path), model="m"
+                    )
+
+        r1.refresh_from_db()
+        r2.refresh_from_db()
+        r3.refresh_from_db()
+        # the two rows saved before the drop are committed...
+        self.assertEqual(r1.status, IncidentReport.StatusType.llm_rel)
+        self.assertIsNotNone(r1.time_judged)
+        self.assertEqual(r2.status, IncidentReport.StatusType.llm_rej)
+        self.assertIsNotNone(r2.time_judged)
+        # ...the row whose save failed remains `new` for the next run to retry
+        self.assertEqual(r3.status, IncidentReport.StatusType.new)
+        self.assertIsNone(r3.time_judged)
