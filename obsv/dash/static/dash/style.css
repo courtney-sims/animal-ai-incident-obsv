@@ -1,0 +1,297 @@
+/* Animal-AI Incident Observatory — hand-rolled light/earthy theme, no JS. */
+
+:root {
+  --bg: #f7f4ef;          /* warm paper */
+  --surface: #ffffff;
+  --text: #24332a;        /* deep moss-black */
+  --muted: #6b756e;
+  --border: #e3dccf;      /* warm sand */
+  --accent: #3f6d4a;      /* moss green */
+  --accent-hover: #335a3c;
+  --badge-nhtsa-bg: #eef3ec;
+  --badge-nhtsa-text: #335a3c;
+  --badge-openalex-bg: #f4ead7;
+  --badge-openalex-text: #6b5b2f;
+
+  --serif: Georgia, 'Times New Roman', serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* --- Header --- */
+.site-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.site-header__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+.site-title {
+  font-family: var(--serif);
+  font-size: 1.35rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.site-title:hover { color: var(--accent); text-decoration: none; }
+.site-nav a { margin-left: 16px; }
+
+main.container { padding-top: 32px; padding-bottom: 64px; }
+
+/* --- List page --- */
+.page-heading {
+  font-family: var(--serif);
+  font-size: 2rem;
+  margin: 0 0 4px;
+}
+.count-line {
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+
+/* --- Filter bar --- */
+.filter-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.filter-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.filter-field__label {
+  margin-bottom: 4px;
+}
+.filter-field input,
+.filter-field select {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  min-width: 160px;
+}
+.filter-field input:focus,
+.filter-field select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.filter-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.btn {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  padding: 8px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  cursor: pointer;
+  display: inline-block;
+}
+.btn--primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn--primary:hover { background: var(--accent-hover); color: #fff; text-decoration: none; }
+.btn--ghost {
+  background: transparent;
+  color: var(--accent);
+}
+.btn--ghost:hover { background: var(--badge-nhtsa-bg); text-decoration: none; }
+
+/* --- Table --- */
+.incident-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.incident-table th,
+.incident-table td {
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.incident-table thead th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--bg);
+}
+.incident-table tbody tr:last-child td { border-bottom: none; }
+.incident-table tbody tr:hover { background: var(--badge-nhtsa-bg); }
+.cell-incident a {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+/* --- Badges --- */
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.badge--nhtsa_incident_report {
+  background: var(--badge-nhtsa-bg);
+  color: var(--badge-nhtsa-text);
+}
+.badge--openalex_work {
+  background: var(--badge-openalex-bg);
+  color: var(--badge-openalex-text);
+}
+
+/* --- Pagination --- */
+.pagination {
+  margin-top: 28px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.pagination .current { font-weight: 700; }
+.pagination .disabled { color: var(--muted); }
+
+/* --- Empty state --- */
+.empty-state {
+  text-align: center;
+  color: var(--muted);
+  padding: 64px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* --- Detail page --- */
+.detail {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.detail__back { margin: 0 0 16px; }
+.detail__title {
+  font-family: var(--serif);
+  font-size: 1.9rem;
+  margin: 0 0 8px;
+  line-height: 1.25;
+}
+.detail__title .badge { vertical-align: middle; margin-left: 8px; }
+.detail__meta {
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+.detail__desc {
+  font-size: 1.05rem;
+  margin: 0 0 32px;
+}
+.detail__section {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+  margin-top: 24px;
+}
+.detail__section h2 {
+  font-family: var(--serif);
+  font-size: 1.2rem;
+  margin: 0 0 12px;
+}
+dl.grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 8px 20px;
+  margin: 0;
+}
+dl.grid dt { color: var(--muted); font-size: 0.9rem; }
+dl.grid dd { margin: 0; overflow-wrap: anywhere; }
+
+.detail__source, .detail__permalink { margin-top: 24px; }
+.detail__permalink {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.detail__raw {
+  margin-top: 28px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.detail__raw summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* --- Responsive: table collapses to cards --- */
+@media (max-width: 720px) {
+  .incident-table, .incident-table thead, .incident-table tbody,
+  .incident-table th, .incident-table td, .incident-table tr {
+    display: block;
+  }
+  .incident-table thead { display: none; }
+  .incident-table tr {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 0;
+  }
+  .incident-table td {
+    border-bottom: none;
+    padding: 6px 16px;
+  }
+  .incident-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  dl.grid { grid-template-columns: 1fr; gap: 2px 0; }
+  dl.grid dd { margin-bottom: 10px; }
+}

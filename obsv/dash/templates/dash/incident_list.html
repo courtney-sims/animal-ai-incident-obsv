@@ -1,0 +1,87 @@
+{% extends "dash/base.html" %}
+
+{% block title %}Incidents — Animal-AI Incident Observatory{% endblock %}
+
+{% block content %}
+<h1 class="page-heading">Incidents</h1>
+{% if is_dev %}<p class="count-line">{{ approved_count }} approved of {{ total_count }} reports · {{ filtered_count }} shown</p>{% else %}<p class="count-line">Showing {{ filtered_count }} incident{{ filtered_count|pluralize }}</p>{% endif %}
+
+<form class="filter-bar" method="get" action="{% url 'incident_list' %}">
+  <div class="filter-fields">
+    {% for field in filter.form %}
+      {% if is_dev or field.name != "status" %}
+      <label class="filter-field">
+        <span class="filter-field__label">{{ field.label }}</span>
+        {{ field }}
+      </label>
+      {% endif %}
+    {% endfor %}
+  </div>
+  <div class="filter-actions">
+    <button type="submit" class="btn btn--primary">Apply</button>
+    <a class="btn btn--ghost" href="{% url 'incident_list' %}">Reset</a>
+  </div>
+</form>
+
+{% if rows %}
+<table class="incident-table">
+  <thead>
+    <tr>
+      <th>Incident</th>
+      <th>Date</th>
+      <th>Location</th>
+      <th>AI System</th>
+      <th>Animal/Impact</th>
+      <th>Source</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td data-label="Incident" class="cell-incident">
+        <a href="{% url 'incident_detail' row.incident.pk %}">{{ row.display.title }}</a>
+      </td>
+      <td data-label="Date">{% if row.display.date %}{{ row.display.date|date:"Y-m-d" }}{% else %}—{% endif %}</td>
+      <td data-label="Location">{{ row.display.location|default:"—" }}</td>
+      <td data-label="AI System">{{ row.display.ai_system|default:"—" }}</td>
+      <td data-label="Animal/Impact">{{ row.display.animal|default:"—" }}</td>
+      <td data-label="Source">
+        <span class="badge badge--{{ row.incident.source }}">{{ row.display.source_label }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if page_obj.paginator.num_pages > 1 %}
+<nav class="pagination">
+  {% if page_obj.has_previous %}
+    <a href="?{% if base_query %}{{ base_query }}&{% endif %}page={{ page_obj.previous_page_number }}">« Prev</a>
+  {% else %}
+    <span class="disabled">« Prev</span>
+  {% endif %}
+
+  {% for num in page_obj.paginator.page_range %}
+    {% if num == page_obj.number %}
+      <span class="current">{{ num }}</span>
+    {% elif num == 1 %}
+      <a href="?{% if base_query %}{{ base_query }}{% endif %}">{{ num }}</a>
+    {% else %}
+      <a href="?{% if base_query %}{{ base_query }}&{% endif %}page={{ num }}">{{ num }}</a>
+    {% endif %}
+  {% endfor %}
+
+  {% if page_obj.has_next %}
+    <a href="?{% if base_query %}{{ base_query }}&{% endif %}page={{ page_obj.next_page_number }}">Next »</a>
+  {% else %}
+    <span class="disabled">Next »</span>
+  {% endif %}
+</nav>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+  <p>No approved incidents yet — reports appear here after human review.</p>
+</div>
+{% endif %}
+{% endblock %}

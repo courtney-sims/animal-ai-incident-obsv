@@ -12,6 +12,7 @@ dependencies = [
     "psycopg",
     "django",
     "django-environ",
+    "django-filter",
 ]
 
 [project.optional-dependencies]

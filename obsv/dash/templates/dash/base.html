@@ -1,0 +1,22 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Animal-AI Incident Observatory{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'dash/style.css' %}">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <a class="site-title" href="{% url 'incident_list' %}">Animal-AI Incident Observatory</a>
+      <nav class="site-nav">
+        <a href="{% url 'incident_list' %}">Incidents</a>
+      </nav>
+    </div>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

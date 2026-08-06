@@ -3,3 +3,4 @@ tablib
 psycopg
 django
 django-environ
+django-filter

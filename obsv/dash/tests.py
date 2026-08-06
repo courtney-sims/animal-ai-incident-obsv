@@ -9,7 +9,7 @@ the command writes to its (temp) workdir, so they see the exact pk-derived
 """
 
 import contextlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import tempfile
 from io import StringIO
@@ -19,7 +19,8 @@ from unittest import mock
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db.utils import OperationalError
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 
 from dash.models import IncidentReport, PipelineRun
@@ -664,3 +665,406 @@ class ApplyJudgmentsTestCase(TestCase):
         # ...the row whose save failed remains `new` for the next run to retry
         self.assertEqual(r3.status, IncidentReport.StatusType.new)
         self.assertIsNone(r3.time_judged)
+
+
+# ---------------------------------------------------------------------------
+# public frontend: incident list + detail views
+# ---------------------------------------------------------------------------
+
+
+def make_incident(source_id, status=IncidentReport.StatusType.approved, **fields):
+    """Create an IncidentReport with sensible defaults for the view tests."""
+    data = {
+        "source": IncidentReport.SourceType.NHTSA,
+        "source_id": source_id,
+        "raw_data": {},
+        "time_ingested": timezone.now(),
+        "status": status,
+    }
+    data.update(fields)
+    return IncidentReport.objects.create(**data)
+
+
+class IncidentListViewTests(TestCase):
+    def setUp(self):
+        self.url = reverse("incident_list")
+
+    def test_default_shows_only_approved(self):
+        approved = make_incident("A1", title="Approved incident")
+        make_incident("N1", status=IncidentReport.StatusType.new, title="New incident")
+        make_incident(
+            "P1", status=IncidentReport.StatusType.pending, title="Pending incident"
+        )
+
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        titles = [r["incident"].pk for r in resp.context["rows"]]
+        self.assertEqual(titles, [approved.pk])
+        self.assertContains(resp, "Approved incident")
+        self.assertNotContains(resp, "New incident")
+
+    def test_status_param_overrides_default(self):
+        make_incident("A1", title="Approved incident")
+        new = make_incident(
+            "N1", status=IncidentReport.StatusType.new, title="New incident"
+        )
+
+        with override_settings(DEBUG=True):
+            resp = self.client.get(
+                self.url, {"status": IncidentReport.StatusType.new}
+            )
+        self.assertEqual(resp.status_code, 200)
+        pks = [r["incident"].pk for r in resp.context["rows"]]
+        self.assertEqual(pks, [new.pk])
+        self.assertContains(resp, "New incident")
+        self.assertNotContains(resp, "Approved incident")
+
+    def test_status_field_dev_only(self):
+        make_incident("A1", title="Approved incident")
+        with override_settings(DEBUG=True):
+            resp_dev = self.client.get(self.url)
+        self.assertContains(resp_dev, 'name="status"')  # visible in dev
+
+        resp_prod = self.client.get(self.url)
+        self.assertNotContains(resp_prod, 'name="status"')
+
+    def test_status_param_ignored_in_prod(self):
+        approved = make_incident("A1", title="Approved incident")
+        make_incident(
+            "N1", status=IncidentReport.StatusType.new, title="New incident"
+        )
+
+        resp = self.client.get(self.url, {"status": IncidentReport.StatusType.new})
+        self.assertEqual(resp.status_code, 200)
+        pks = [r["incident"].pk for r in resp.context["rows"]]
+        self.assertEqual(pks, [approved.pk])
+        self.assertContains(resp, "Approved incident")
+        self.assertNotContains(resp, "New incident")
+
+    def test_count_line_shows_metrics_in_dev_only(self):
+        make_incident("A1", title="Approved incident")
+        make_incident("N1", status=IncidentReport.StatusType.new, title="New incident")
+
+        with override_settings(DEBUG=True):
+            resp_dev = self.client.get(self.url)
+        self.assertContains(resp_dev, "1 approved of 2 reports · 1 shown")
+
+        resp_prod = self.client.get(self.url)
+        self.assertContains(resp_prod, "Showing 1 incident")
+        self.assertNotContains(resp_prod, "approved of")
+
+    def test_q_matches_title_description_and_narrative(self):
+        by_title = make_incident("T1", title="Elephant collision")
+        by_desc = make_incident("D1", title="Row two", description="a rare pangolin")
+        by_narr = make_incident(
+            "R1", title="Row three", raw_data={"Narrative": "struck a wombat"}
+        )
+        make_incident("X1", title="Unrelated", description="nothing here")
+
+        for term, expected in [
+            ("elephant", by_title),
+            ("pangolin", by_desc),
+            ("wombat", by_narr),
+        ]:
+            resp = self.client.get(self.url, {"q": term})
+            pks = [r["incident"].pk for r in resp.context["rows"]]
+            self.assertEqual(pks, [expected.pk], term)
+
+    def test_source_filter(self):
+        nhtsa = make_incident("N1", source=IncidentReport.SourceType.NHTSA)
+        make_incident("O1", source=IncidentReport.SourceType.OPENALEX)
+
+        resp = self.client.get(
+            self.url, {"source": IncidentReport.SourceType.NHTSA}
+        )
+        pks = [r["incident"].pk for r in resp.context["rows"]]
+        self.assertEqual(pks, [nhtsa.pk])
+
+    def test_animal_type_filter(self):
+        wild = make_incident("W1", animal_type=IncidentReport.AnimalType.wild)
+        make_incident("F1", animal_type=IncidentReport.AnimalType.farmed)
+
+        resp = self.client.get(
+            self.url, {"animal_type": IncidentReport.AnimalType.wild}
+        )
+        pks = [r["incident"].pk for r in resp.context["rows"]]
+        self.assertEqual(pks, [wild.pk])
+
+    def test_date_range_filter(self):
+        early = make_incident(
+            "E1", time_occurred=timezone.make_aware(datetime(2026, 1, 15))
+        )
+        mid = make_incident(
+            "M1", time_occurred=timezone.make_aware(datetime(2026, 3, 15))
+        )
+        late = make_incident(
+            "L1", time_occurred=timezone.make_aware(datetime(2026, 6, 15))
+        )
+
+        resp = self.client.get(
+            self.url, {"date_from": "2026-02-01", "date_to": "2026-04-01"}
+        )
+        pks = {r["incident"].pk for r in resp.context["rows"]}
+        self.assertEqual(pks, {mid.pk})
+        self.assertNotIn(early.pk, pks)
+        self.assertNotIn(late.pk, pks)
+
+    def test_pagination_second_page_and_out_of_range(self):
+        for i in range(30):
+            make_incident(f"P{i:02d}", title=f"Incident {i:02d}")
+
+        resp = self.client.get(self.url)
+        self.assertEqual(len(resp.context["rows"]), 25)
+
+        resp2 = self.client.get(self.url, {"page": 2})
+        self.assertEqual(len(resp2.context["rows"]), 5)
+        self.assertEqual(resp2.context["page_obj"].number, 2)
+
+        # out-of-range -> clamp to last page
+        resp3 = self.client.get(self.url, {"page": 999})
+        self.assertEqual(resp3.context["page_obj"].number, 2)
+
+    def test_pagination_links_preserve_query_params(self):
+        for i in range(30):
+            make_incident(
+                f"S{i:02d}",
+                source=IncidentReport.SourceType.NHTSA,
+                title=f"Incident {i:02d}",
+            )
+
+        resp = self.client.get(
+            self.url, {"source": IncidentReport.SourceType.NHTSA}
+        )
+        content = resp.content.decode()
+        self.assertIn("source=nhtsa_incident_report&page=2", content)
+
+    def test_empty_state(self):
+        resp = self.client.get(self.url)
+        self.assertContains(resp, "No approved incidents yet")
+
+
+class IncidentDetailViewTests(TestCase):
+    def test_detail_renders_for_approved(self):
+        inc = make_incident(
+            "A1",
+            title="Approved incident",
+            description="details here",
+            url="https://example.com/report",
+        )
+        resp = self.client.get(reverse("incident_detail", args=[inc.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Approved incident")
+        self.assertContains(resp, "details here")
+        self.assertContains(resp, "https://example.com/report")
+
+    def test_detail_404_for_missing_pk(self):
+        resp = self.client.get(reverse("incident_detail", args=[999999]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_detail_404_for_non_approved(self):
+        inc = make_incident("P1", status=IncidentReport.StatusType.pending)
+        resp = self.client.get(reverse("incident_detail", args=[inc.pk]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_detail_raw_data_fallbacks(self):
+        inc = make_incident(
+            "R1",
+            title="",
+            description="",
+            raw_data={
+                "Crash With": "Deer",
+                "City": "Austin",
+                "Narrative": "vehicle struck a deer",
+                "Reporting Entity": "Waymo LLC",
+            },
+        )
+        resp = self.client.get(reverse("incident_detail", args=[inc.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Deer in Austin")
+        self.assertContains(resp, "vehicle struck a deer")
+
+
+# ---------------------------------------------------------------------------
+# admin: incident review (approve / reject)
+# ---------------------------------------------------------------------------
+
+
+from django.contrib.auth import get_user_model  # noqa: E402
+
+
+class IncidentReviewAdminTests(TestCase):
+    CHANGELIST = "/admin/dash/incidentreport/"
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_superuser(
+            username="reviewer", email="r@example.com", password="pw12345"
+        )
+        self.client.force_login(self.user)
+
+    def _pending(self, source_id="P1", **fields):
+        return make_incident(
+            source_id, status=IncidentReport.StatusType.pending, **fields
+        )
+
+    def _review_url(self, pk):
+        return f"/admin/dash/incidentreport/{pk}/review/"
+
+    # -- changelist scope --------------------------------------------------
+
+    def test_changelist_lists_only_pending(self):
+        pending = self._pending("P1", title="Pending one")
+        make_incident("A1", title="Approved one")  # approved by default
+        make_incident("N1", status=IncidentReport.StatusType.new, title="New one")
+
+        resp = self.client.get(self.CHANGELIST)
+        self.assertEqual(resp.status_code, 200)
+        cl = resp.context["cl"]
+        pks = {obj.pk for obj in cl.result_list}
+        self.assertEqual(pks, {pending.pk})
+
+    # -- bulk actions ------------------------------------------------------
+
+    def test_bulk_approve(self):
+        r1 = self._pending("P1")
+        r2 = self._pending("P2")
+        resp = self.client.post(
+            self.CHANGELIST,
+            {"action": "approve_selected", "_selected_action": [r1.pk, r2.pk]},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        for r in (r1, r2):
+            r.refresh_from_db()
+            self.assertEqual(r.status, IncidentReport.StatusType.approved)
+            self.assertEqual(r.reviewer, self.user)
+            self.assertIsNotNone(r.time_reviewed)
+
+    def test_bulk_reject(self):
+        r1 = self._pending("P1")
+        self.client.post(
+            self.CHANGELIST,
+            {"action": "reject_selected", "_selected_action": [r1.pk]},
+            follow=True,
+        )
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.rejected)
+        self.assertEqual(r1.reviewer, self.user)
+        self.assertIsNotNone(r1.time_reviewed)
+
+    # -- per-row review page -----------------------------------------------
+
+    def test_review_get_renders_for_pending(self):
+        r1 = self._pending("P1", title="Pending one")
+        resp = self.client.get(self._review_url(r1.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Pending one")
+        self.assertContains(resp, "csrfmiddlewaretoken")
+
+    def test_review_get_404_for_non_pending(self):
+        approved = make_incident("A1")
+        resp = self.client.get(self._review_url(approved.pk))
+        self.assertEqual(resp.status_code, 404)
+
+    def _review_form_data(self, incident, **overrides):
+        data = {
+            "title": incident.title,
+            "description": incident.description,
+            "url": incident.url,
+            "animal_type": incident.animal_type,
+            "animal_species": incident.animal_species,
+            "animal_count": incident.animal_count,
+            "harm_type": incident.harm_type,
+            "harm_description": incident.harm_description,
+            "ai_system": incident.ai_system,
+            "ai_system_manufacturer": incident.ai_system_manufacturer,
+            "city": incident.city,
+            "country": incident.country,
+            "status": incident.status,
+            "confidence": incident.confidence,
+            "llm_reasoning": incident.llm_reasoning,
+            "llm_model": incident.llm_model,
+            "reviewer": "",
+        }
+        data.update(overrides)
+        return data
+
+    def test_review_approve(self):
+        r1 = self._pending("P1", title="Pending one")
+        data = self._review_form_data(r1, title="Edited title", approve="Approve")
+        resp = self.client.post(self._review_url(r1.pk), data)
+        self.assertRedirects(resp, self.CHANGELIST)
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.approved)
+        self.assertEqual(r1.title, "Edited title")
+        self.assertEqual(r1.reviewer, self.user)
+        self.assertIsNotNone(r1.time_reviewed)
+
+    def test_review_reject(self):
+        r1 = self._pending("P1")
+        data = self._review_form_data(r1, reject="Reject")
+        resp = self.client.post(self._review_url(r1.pk), data)
+        self.assertRedirects(resp, self.CHANGELIST)
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.rejected)
+        self.assertEqual(r1.reviewer, self.user)
+        self.assertIsNotNone(r1.time_reviewed)
+
+    def test_review_save_keeps_pending(self):
+        r1 = self._pending("P1", title="Pending one")
+        data = self._review_form_data(r1, title="Just edited", save="Save")
+        resp = self.client.post(self._review_url(r1.pk), data)
+        self.assertRedirects(resp, self.CHANGELIST)
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.pending)
+        self.assertEqual(r1.title, "Just edited")
+        # a plain save must not stamp reviewer/time_reviewed
+        self.assertIsNone(r1.reviewer)
+        self.assertIsNone(r1.time_reviewed)
+
+    # -- permissions -------------------------------------------------------
+
+    def test_anonymous_denied(self):
+        self.client.logout()
+        r1 = self._pending("P1")
+        for url in (self.CHANGELIST, self._review_url(r1.pk)):
+            resp = self.client.get(url)
+            self.assertIn(resp.status_code, (301, 302))
+            self.assertIn("/admin/login/", resp.url)
+
+    def test_non_staff_denied(self):
+        get_user_model().objects.create_user(
+            username="plain", password="pw12345"
+        )
+        self.client.logout()
+        self.client.login(username="plain", password="pw12345")
+        r1 = self._pending("P1")
+        resp = self.client.get(self._review_url(r1.pk))
+        self.assertIn(resp.status_code, (301, 302))
+        self.assertIn("/admin/login/", resp.url)
+
+    # -- persistence vs pipeline rerun -------------------------------------
+
+    def test_admin_edits_survive_pipeline_rerun(self):
+        # An approved, human-edited row must not be reverted by a rerun: the
+        # pipeline preserves human status and fills only default fields.
+        r1 = self._pending("N1", raw_data={"Report ID": "N1"})
+        data = self._review_form_data(r1, title="Human title", approve="Approve")
+        self.client.post(self._review_url(r1.pk), data)
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.approved)
+
+        # simulate a pipeline rerun over the same natural key
+        with tempfile.TemporaryDirectory() as wd, mock.patch(
+            "pipeline.incident_fetcher.collect_data",
+            return_value=[nhtsa_entry("N1")],
+        ), mock.patch(
+            "pipeline.incident_classifier.classify", side_effect=fake_classify()
+        ), mock.patch(
+            "pipeline.incident_classifier.extract_details",
+            side_effect=fake_extract(),
+        ):
+            call_command("run_pipeline", "--workdir", wd, stdout=StringIO())
+
+        r1.refresh_from_db()
+        self.assertEqual(r1.status, IncidentReport.StatusType.approved)
+        self.assertEqual(r1.title, "Human title")

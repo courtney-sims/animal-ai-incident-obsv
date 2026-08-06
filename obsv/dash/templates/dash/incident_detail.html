@@ -1,0 +1,96 @@
+{% extends "dash/base.html" %}
+
+{% block title %}{{ display.title }} — Animal-AI Incident Observatory{% endblock %}
+
+{% block content %}
+<article class="detail">
+  <p class="detail__back"><a href="{% url 'incident_list' %}">← Back to incidents</a></p>
+
+  <h1 class="detail__title">
+    {{ display.title }}
+    <span class="badge badge--{{ incident.source }}">{{ display.source_label }}</span>
+  </h1>
+
+  <p class="detail__meta">
+    {% if display.date %}{{ display.date|date:"F j, Y" }}{% endif %}
+    {% if display.date and display.location %} · {% endif %}
+    {% if display.location %}{{ display.location }}{% endif %}
+  </p>
+
+  {% if incident.description %}
+    <p class="detail__desc">{{ incident.description }}</p>
+  {% elif incident.raw_data.Narrative %}
+    <p class="detail__desc">{{ incident.raw_data.Narrative }}</p>
+  {% endif %}
+
+  <section class="detail__section">
+    <h2>Details</h2>
+    <dl class="grid">
+      {% if incident.animal_type and incident.animal_type != "unknown" %}
+        <dt>Animal type</dt><dd>{{ incident.get_animal_type_display }}</dd>
+      {% endif %}
+      {% if incident.animal_species %}
+        <dt>Species</dt><dd>{{ incident.animal_species }}</dd>
+      {% endif %}
+      {% if incident.animal_count and incident.animal_count != -1 %}
+        <dt>Count</dt><dd>{{ incident.animal_count }}</dd>
+      {% endif %}
+      {% if display.ai_system %}
+        <dt>AI system</dt><dd>{{ display.ai_system }}</dd>
+      {% endif %}
+      {% if incident.ai_system_manufacturer %}
+        <dt>Manufacturer</dt><dd>{{ incident.ai_system_manufacturer }}</dd>
+      {% endif %}
+      {% if display.location %}
+        <dt>Location</dt><dd>{{ display.location }}</dd>
+      {% endif %}
+      {% if incident.harm_type %}
+        <dt>Harm type</dt><dd>{{ incident.harm_type }}</dd>
+      {% endif %}
+      {% if incident.harm_description %}
+        <dt>Harm</dt><dd>{{ incident.harm_description }}</dd>
+      {% endif %}
+    </dl>
+  </section>
+
+  <section class="detail__section">
+    <h2>Timeline</h2>
+    <dl class="grid">
+      {% if incident.time_occurred %}<dt>Occurred</dt><dd>{{ incident.time_occurred|date:"Y-m-d" }}</dd>{% endif %}
+      {% if incident.time_reported %}<dt>Reported</dt><dd>{{ incident.time_reported|date:"Y-m-d" }}</dd>{% endif %}
+      {% if incident.time_ingested %}<dt>Ingested</dt><dd>{{ incident.time_ingested|date:"Y-m-d" }}</dd>{% endif %}
+      {% if incident.time_judged %}<dt>Judged</dt><dd>{{ incident.time_judged|date:"Y-m-d" }}</dd>{% endif %}
+      {% if incident.time_reviewed %}<dt>Reviewed</dt><dd>{{ incident.time_reviewed|date:"Y-m-d" }}</dd>{% endif %}
+    </dl>
+  </section>
+
+  {% if confidence_label or incident.llm_reasoning or incident.llm_model or incident.reviewer %}
+  <section class="detail__section">
+    <h2>Judgment</h2>
+    <dl class="grid">
+      {% if confidence_label %}<dt>Confidence</dt><dd>{{ confidence_label }}</dd>{% endif %}
+      {% if incident.llm_reasoning %}<dt>Reasoning</dt><dd>{{ incident.llm_reasoning }}</dd>{% endif %}
+      {% if incident.llm_model %}<dt>Model</dt><dd>{{ incident.llm_model }}</dd>{% endif %}
+      {% if incident.reviewer %}<dt>Reviewer</dt><dd>{{ incident.reviewer.username }}</dd>{% endif %}
+    </dl>
+  </section>
+  {% endif %}
+
+  {% if incident.url %}
+    <p class="detail__source"><a href="{{ incident.url }}" rel="noopener noreferrer" target="_blank">View source report ↗</a></p>
+  {% endif %}
+
+  <p class="detail__permalink">Permalink: <a href="{{ request.build_absolute_uri }}">{{ request.build_absolute_uri }}</a></p>
+
+  {% if raw_items %}
+  <details class="detail__raw">
+    <summary>Raw data</summary>
+    <dl class="grid">
+      {% for key, value in raw_items %}
+        <dt>{{ key }}</dt><dd>{{ value }}</dd>
+      {% endfor %}
+    </dl>
+  </details>
+  {% endif %}
+</article>
+{% endblock %}
