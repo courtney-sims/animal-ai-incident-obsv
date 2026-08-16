@@ -1,14 +1,14 @@
-# Animal-AI Incident Observer
+# Animal-AI Incident Observatory
 
 The Animal AI Incident Observatory is a public platform for tracking, cataloguing, and disseminating incidents in which AI systems caused direct harm to non-human animals.
 
-This is just a POC so far for programmatically pulling data from a couple of sources and using LLM relevance evaluation to filter for AI->Animal direct harm incidents. The output is a csv listing each incident deemed relevant along with their source, the LLM's reasoning for considering that incident relevant, and a qualitative confidence score.
+The work-in-progress observatory can be found at https://courtneyysims.pythonanywhere.com/
 
 ## How it works
 
 Data sources currently included:
 1. **NHTSA SGO-2021-01** — Standing General Order crash reports from AV operators (Waymo, Tesla, Zoox, Avride, etc.).
-2. **OpenAlex** — Academic works matching a search for `"animal"`, filtered to the last 30 days.
+2. **OpenAlex** - academic works
 
 The pipeline runs in three steps:
 
@@ -17,7 +17,7 @@ The pipeline runs in three steps:
 3. **Hydrate.** An LLM agent (via `opencode run`) looks at all "llm_relevant" entries and fills out additional data fields based on the incident as described from the source and marks hydrated entries as "pending".
 
 Human intervention is needed at the final step:
-4. **Review.** Humans can mark "pending" entries as either "approved" or "rejected".
+4. **Review.** Humans can mark "pending" entries as either "approved" or "rejected". Only approved entries appear on the observatory.
 
 ## Setup
 
