@@ -20,7 +20,7 @@ from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
-from .models import IncidentReport
+from .models import IncidentReport, Subscriber
 
 
 @admin.register(IncidentReport)
@@ -240,3 +240,11 @@ class IncidentReportAdmin(admin.ModelAdmin):
         return TemplateResponse(
             request, "admin/dash/incidentreport/review.html", context
         )
+
+
+@admin.register(Subscriber)
+class SubscriberAdmin(admin.ModelAdmin):
+    list_display = ("email", "subscribed_at", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("email",)
+    ordering = ("-subscribed_at",)

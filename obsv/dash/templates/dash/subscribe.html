@@ -1,0 +1,43 @@
+{% extends "dash/base.html" %}
+
+{% block title %}Subscribe — Animal-AI Incident Observatory{% endblock %}
+
+{% block content %}
+<div class="prose">
+  <h1 class="page-heading">Stay up to date</h1>
+
+    {% if success %}
+      <div class="success-notice">
+        <p><strong>Thanks — you're on the list.</strong></p>
+      </div>
+    {% else %}
+      <p>
+        Get a monthly newsletter with new incidents and observatory development
+        updates. You can unsubscribe at any time via a link provided in every email.
+      </p>
+
+      <form class="page-form" method="post" action="{% url 'subscribe' %}">
+        {% csrf_token %}
+
+        {% for field in form %}
+          {% if field.name == "website" %}
+            {{ field }}
+          {% else %}
+            <div class="form-field">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.errors %}
+                <p class="form-field__error">{{ field.errors|striptags }}</p>
+              {% endif %}
+            </div>
+          {% endif %}
+        {% endfor %}
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn--primary">Subscribe</button>
+        </div>
+      </form>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
