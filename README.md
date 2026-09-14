@@ -186,8 +186,13 @@ The test set has 6 entries (4 NHTSA + 2 OpenAlex), with 3 expected as animal-rel
 
 ## Tests
 
+### Pipeline
+
 ```bash
-source .venv/bin/activate
 python -m pytest -v
 ```
+### Django
 
+```bash
+python manage.py test dash
+```
