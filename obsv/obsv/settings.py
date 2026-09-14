@@ -28,7 +28,10 @@ SECRET_KEY = env('DJANGO_SECRET_KEY', default='django-insecure-kiol*x)&d(ie7-9h^
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env.bool('DJANGO_DEBUG', default=True)
 
-ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost'])
+ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.1', '[::1]'])
+
+# Public contact address shown on the Contact page. Set the real address in .env.
+CONTACT_EMAIL = env('CONTACT_EMAIL', default='contact@example.com')
 
 
 # Application definition
