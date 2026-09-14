@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 
@@ -7,6 +9,7 @@ class IncidentReport(models.Model):
     class SourceType(models.TextChoices):
         NHTSA = "nhtsa_incident_report", "NHTSA Incident Report"
         OPENALEX = "openalex_work", "OpenAlex Work"
+        USER = "user_submitted", "User Submitted"
 
     #LLM judgment confidence mapped to a plain int (percentage later)
     class ConfidenceLevel(models.IntegerChoices):
@@ -20,7 +23,7 @@ class IncidentReport(models.Model):
 
     #--- Provenance (set at ingest; required) ---
 
-    #Pipeline source that produced this record
+    #Pipeline source (or user_submitted) that produced this record
     source = models.CharField(max_length=32, choices=SourceType.choices)
 
     #Natural key from the source (NHTSA Report ID / OpenAlex id); stable across reruns
@@ -150,6 +153,19 @@ class PipelineRun(models.Model):
 
     def __str__(self):
         return f"PipelineRun {self.pk} started={self.started_at} status={self.status}"
+
+#Newsletter subscriber
+class Subscriber(models.Model):
+    email = models.EmailField(unique=True)
+    subscribed_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    #Unused today; here so the future unsubscribe link needs no schema change
+    unsubscribe_token = models.UUIDField(
+        default=uuid.uuid4, unique=True, editable=False
+    )
+
+    def __str__(self):
+        return self.email
 
 #Each source used for data collection
 class SourceIngestion(models.Model):
