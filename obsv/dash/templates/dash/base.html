@@ -11,7 +11,11 @@
     <div class="container site-header__inner">
       <a class="site-title" href="{% url 'incident_list' %}">Animal-AI Incident Observatory</a>
       <nav class="site-nav">
-        <a href="{% url 'incident_list' %}">Incidents</a>
+        <a href="{% url 'incident_list' %}">Home</a>
+        <a href="{% url 'about' %}">About</a>
+        <a href="{% url 'incident_submit' %}">Submit an incident</a>
+        <a href="{% url 'subscribe' %}">Subscribe</a>
+        <a href="{% url 'contact' %}">Contact</a>
       </nav>
     </div>
   </header>
