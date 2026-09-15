@@ -40,11 +40,10 @@ The project uses a `.env` file loaded by `django-environ` on startup.
   meters the API by a daily USD budget: **$1/day with a key vs only $0.01/day
   without**. The pipeline's search queries cost ~$0.001 each, so an
   unauthenticated run (~10 requests/day allowance) can't complete a single pass.
-  Add it to `.env`:
-  `OPENALEX_API_KEY=your-key`
 - **`OPENALEX_MAILTO`** (optional) — your email address, sent as the `mailto`
   param so OpenAlex can contact you about your usage. Add it to `.env`:
   `OPENALEX_MAILTO=you@example.com`
+- **`CONTACT_EMAIL`** (required for contact page) - email address displayed on contact page
 
 ### Local database setup
 
