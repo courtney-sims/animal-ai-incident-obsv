@@ -1,0 +1,37 @@
+{% extends "dash/base.html" %}
+
+{% block title %}About — Animal-AI Incident Observatory{% endblock %}
+
+{% block content %}
+<article class="prose">
+  <h1 class="page-heading">About</h1>
+
+  <section>
+    <h2>Overview </h2>
+    <p>
+      The Animal AI Incident Observatory is a public, citable record of cases where artificial intelligence systems
+      have directly harmed animals. 
+    </p>
+    <p>
+      Animals are rarely treated as stakeholders in conversations about AI risk, safety, or governance — despite being 
+      directly affected by AI systems in areas such as agriculture, autonomous vehicles, wildlife management, and 
+      robotics. Without a centralized record, these incidents stay scattered across news archives, institutional 
+      reports, and research papers that are hard to find and compare.
+    </p>
+  </section>
+
+  <section>
+    <h2>How incidents are collected</h2>
+    <p>
+      The observatory pulls from various news sources, public reports, and research papers for instances of AI 
+      system impact on non-human animals. Each candidate incident goes through an LLM-assisted review pipeline 
+      followed by a human moderator review before publication.
+    </p>
+    <p>
+      Each incident is classified along several dimensions like animal type, number of animals impacted, location of 
+      the incident, etc. Official taxonomy and operational definitions are still in progress.
+    </p>
+  </section>
+
+</article>
+{% endblock %}

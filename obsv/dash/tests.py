@@ -23,7 +23,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from dash.models import IncidentReport, PipelineRun
+from dash.models import IncidentReport, PipelineRun, Subscriber
 from pipeline.incident_classifier import ClassificationOutputError
 from pipeline.incident_fetcher import URL
 
@@ -1068,3 +1068,171 @@ class IncidentReviewAdminTests(TestCase):
         r1.refresh_from_db()
         self.assertEqual(r1.status, IncidentReport.StatusType.approved)
         self.assertEqual(r1.title, "Human title")
+
+
+# ---------------------------------------------------------------------------
+# public pages: nav, about, contact
+# ---------------------------------------------------------------------------
+
+
+class PublicNavTests(TestCase):
+    def _nav_links(self, resp):
+        content = resp.content.decode()
+        for name in ("about", "incident_submit", "subscribe", "contact"):
+            self.assertIn(reverse(name), content)
+        self.assertIn(reverse("incident_list"), content)
+
+    def test_nav_renders_on_home(self):
+        resp = self.client.get(reverse("incident_list"))
+        self.assertEqual(resp.status_code, 200)
+        self._nav_links(resp)
+
+    def test_nav_renders_on_about(self):
+        resp = self.client.get(reverse("about"))
+        self.assertEqual(resp.status_code, 200)
+        self._nav_links(resp)
+
+
+class AboutPageTests(TestCase):
+    def test_about_renders(self):
+        resp = self.client.get(reverse("about"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "About")
+
+
+class ContactPageTests(TestCase):
+    def test_contact_shows_configured_email(self):
+        with override_settings(CONTACT_EMAIL="hello@observatory.test"):
+            resp = self.client.get(reverse("contact"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "hello@observatory.test")
+        self.assertContains(resp, "mailto:hello@observatory.test")
+
+
+# ---------------------------------------------------------------------------
+# public pages: submit an incident
+# ---------------------------------------------------------------------------
+
+
+class IncidentSubmitTests(TestCase):
+    def setUp(self):
+        self.url = reverse("incident_submit")
+
+    def test_get_renders_form(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "csrfmiddlewaretoken")
+        self.assertContains(resp, 'name="url"')
+        self.assertContains(resp, 'name="description"')
+
+    def test_link_only_submission_creates_pending_report(self):
+        resp = self.client.post(self.url, {"url": "https://example.com/incident"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "your submission was received")
+
+        self.assertEqual(IncidentReport.objects.count(), 1)
+        inc = IncidentReport.objects.get()
+        self.assertEqual(inc.status, IncidentReport.StatusType.pending)
+        self.assertEqual(inc.source, IncidentReport.SourceType.USER)
+        self.assertTrue(inc.source_id)
+        self.assertIsNotNone(inc.time_ingested)
+        self.assertEqual(inc.url, "https://example.com/incident")
+        self.assertEqual(inc.raw_data["url"], "https://example.com/incident")
+
+    def test_full_details_submission_maps_fields(self):
+        data = {
+            "url": "https://example.com/incident",
+            "description": "A delivery drone struck a heron mid-flight.",
+            "submitter_email": "reporter@example.com",
+        }
+        resp = self.client.post(self.url, data)
+        self.assertEqual(resp.status_code, 200)
+
+        inc = IncidentReport.objects.get()
+        self.assertEqual(inc.description, "A delivery drone struck a heron mid-flight.")
+
+        self.assertEqual(inc.url, "https://example.com/incident")
+        # submitter email is preserved in raw_data for moderator follow-up
+        self.assertEqual(inc.raw_data["submitter_email"], "reporter@example.com")
+
+    def test_neither_url_nor_description_is_error(self):
+        resp = self.client.post(self.url, {"submitter_email": "reporter@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(IncidentReport.objects.count(), 0)
+        self.assertContains(resp, "at least a link")
+
+    def test_honeypot_drops_submission_silently(self):
+        resp = self.client.post(
+            self.url,
+            {"url": "https://example.com/incident", "website": "spam"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "your submission was received")
+        self.assertEqual(IncidentReport.objects.count(), 0)
+
+    def test_user_submitted_pending_hidden_from_list_but_in_admin_queue(self):
+        self.client.post(self.url, {"url": "https://example.com/incident"})
+        inc = IncidentReport.objects.get()
+
+        # not on the public list (only approved rows show)
+        list_resp = self.client.get(reverse("incident_list"))
+        pks = [r["incident"].pk for r in list_resp.context["rows"]]
+        self.assertNotIn(inc.pk, pks)
+
+        # present in the admin's pending changelist queryset
+        admin_user = get_user_model().objects.create_superuser(
+            username="mod", email="m@example.com", password="pw12345"
+        )
+        self.client.force_login(admin_user)
+        cl_resp = self.client.get("/admin/dash/incidentreport/")
+        cl = cl_resp.context["cl"]
+        self.assertIn(inc.pk, {obj.pk for obj in cl.result_list})
+
+
+# ---------------------------------------------------------------------------
+# public pages: subscribe
+# ---------------------------------------------------------------------------
+
+
+class SubscribeTests(TestCase):
+    def setUp(self):
+        self.url = reverse("subscribe")
+
+    def test_get_renders_slack_and_form(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "sentientfutures.ai/community")
+        self.assertContains(resp, "t-ai-animal-incidents")
+        self.assertContains(resp, 'name="email"')
+
+    def test_valid_signup_creates_active_subscriber(self):
+        resp = self.client.post(self.url, {"email": "fan@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "you're on the list")
+
+        sub = Subscriber.objects.get()
+        self.assertEqual(sub.email, "fan@example.com")
+        self.assertTrue(sub.is_active)
+        self.assertIsNotNone(sub.subscribed_at)
+        self.assertIsNotNone(sub.unsubscribe_token)
+
+    def test_duplicate_signup_same_response_one_row(self):
+        self.client.post(self.url, {"email": "fan@example.com"})
+        resp = self.client.post(self.url, {"email": "fan@example.com"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "you're on the list")
+        self.assertEqual(Subscriber.objects.filter(email="fan@example.com").count(), 1)
+
+    def test_invalid_email_is_error_no_row(self):
+        resp = self.client.post(self.url, {"email": "not-an-email"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Subscriber.objects.count(), 0)
+        self.assertNotContains(resp, "you're on the list")
+
+    def test_honeypot_drops_signup_silently(self):
+        resp = self.client.post(
+            self.url, {"email": "fan@example.com", "website": "spam"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "you're on the list")
+        self.assertEqual(Subscriber.objects.count(), 0)
