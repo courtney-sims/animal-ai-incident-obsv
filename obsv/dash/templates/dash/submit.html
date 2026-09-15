@@ -1,0 +1,59 @@
+{% extends "dash/base.html" %}
+
+{% block title %}Submit an incident — Animal-AI Incident Observatory{% endblock %}
+
+{% block content %}
+<div class="prose">
+  <h1 class="page-heading">Submit an incident</h1>
+
+  {% if success %}
+    <div class="success-notice">
+      <p><strong>Thank you — your submission was received.</strong></p>
+      <p>
+        Every submission is reviewed by a human moderator before it appears
+        publicly. Only approved reports are published, so it may be a little
+        while before you see it on the site.
+      </p>
+      <p><a href="{% url 'incident_submit' %}">Submit another incident</a></p>
+    </div>
+  {% else %}
+    <p>
+      Know of a case where an AI system harmed an animal? Share it below.
+    </p>
+    <p>
+      If you're unsure, submit it anyway and let our moderators decide. 
+      All submissions are reviewed by a human moderator before publishing.
+      Only approved reports are published.
+    </p>
+
+    <form class="page-form" method="post" action="{% url 'incident_submit' %}">
+      {% csrf_token %}
+
+      {% if form.non_field_errors %}
+        <div class="form-errors">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      {% for field in form %}
+        {% if field.name == "website" %}
+          {{ field }}
+        {% else %}
+          <div class="form-field">
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}
+              <p class="form-field__help">{{ field.help_text }}</p>
+            {% endif %}
+            {% if field.errors %}
+              <p class="form-field__error">{{ field.errors|striptags }}</p>
+            {% endif %}
+          </div>
+        {% endif %}
+      {% endfor %}
+
+      <div class="form-actions">
+        <button type="submit" class="btn btn--primary">Submit incident</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}
