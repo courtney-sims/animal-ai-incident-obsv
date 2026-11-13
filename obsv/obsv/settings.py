@@ -30,6 +30,14 @@ DEBUG = env.bool('DJANGO_DEBUG', default=True)
 
 ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.1', '[::1]'])
 
+# Origins trusted for unsafe (POST) requests. Required for the submit and
+# subscribe forms to pass CSRF checks when served over HTTPS on the custom
+# domain. Each entry must include the scheme.
+CSRF_TRUSTED_ORIGINS = env.list(
+    'DJANGO_CSRF_TRUSTED_ORIGINS',
+    default=['https://aianimalobservatory.com'],
+)
+
 # Public contact address shown on the Contact page. Set the real address in .env.
 CONTACT_EMAIL = env('CONTACT_EMAIL', default='contact@example.com')
 
@@ -126,3 +134,14 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Production HTTPS hardening. Only applied when DEBUG is off so local
+# development over plain HTTP is unaffected. PythonAnywhere terminates TLS and
+# forwards the original scheme in the X-Forwarded-Proto header. We intentionally
+# do NOT set SECURE_SSL_REDIRECT here; PythonAnywhere's "Force HTTPS" option
+# handles the redirect.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True

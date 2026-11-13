@@ -2,7 +2,7 @@
 
 The Animal AI Incident Observatory is a public platform for tracking, cataloguing, and disseminating incidents in which AI systems caused direct harm to non-human animals.
 
-The work-in-progress observatory can be found at https://courtneyysims.pythonanywhere.com/
+The work-in-progress observatory can be found at https://aianimalobservatory.com/
 
 ## How it works
 
